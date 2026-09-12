@@ -1,0 +1,189 @@
+cd backend
+python -c "import secrets;print(secrets.token_urlsafe(32))"
+$env:GOOGLE_APPLICATION_CREDENTIALS = "$env:USERPROFILE\Downloads\researchlens-ai-3c90b-firebase-adminsdk-fbsvc-655afee96d.json"                                             
+$env:APP_SECRET_KEY = ""
+python app.py 
+
+
+
+
+here in Analysis Complete papers section related papers found it is showing arix papers but what is really fetched is from AAAI (via DBLP) NeurIPS (via DBLP)ICML (via DBLP)  ICLR (via DBLP) i need what is fetched ad aalysied those papers only to be visible
+---------------------------------------------------------------------------------------------------------------------------------------
+
+# 🔬 ResearchLens AI — Research Gap Detection System
+### Autonomous Research Gap Detection using Agentic AI & Knowledge Graphs
+
+---
+
+## 🚀 STEP-BY-STEP SETUP GUIDE (Beginner Friendly)
+
+---
+
+### STEP 1 — Get Your FREE Groq API Key (2 minutes)
+
+1. Open your browser and go to: **https://console.groq.com**
+2. Click **Sign Up** (it's completely free, no credit card needed)
+3. Once logged in, click **"API Keys"** in the left sidebar
+4. Click **"Create API Key"**
+5. Copy the key — it starts with `gsk_...`
+6. Keep it somewhere safe (you'll paste it into the app)
+
+---
+
+### STEP 2 — Install Python (if not already installed)
+
+1. Go to: **https://www.python.org/downloads/**
+2. Download **Python 3.10 or higher**
+3. During installation, ✅ check **"Add Python to PATH"**
+4. Finish installation
+
+To verify, open Command Prompt (Windows) or Terminal (Mac/Linux) and type:
+```
+python --version
+```
+You should see something like `Python 3.11.x`
+
+---
+
+### STEP 3 — Open the Project in VS Code
+
+1. Open **Visual Studio Code**
+2. Go to **File → Open Folder**
+3. Select the `research_gap_detector` folder
+4. Open the **Terminal** inside VS Code:
+   - Go to menu: **Terminal → New Terminal**
+
+---
+
+### STEP 4 — Install Dependencies
+
+In the VS Code Terminal, type these commands one by one:
+
+```bash
+cd research_gap_detector
+pip install -r requirements.txt
+```
+
+Wait for everything to install (1-2 minutes). You'll see lots of text — that's normal!
+
+---
+
+### STEP 5 — Run the Application
+
+In the same terminal, type:
+
+```bash
+cd backend
+python app.py
+```
+
+You should see:
+```
+ * Running on http://127.0.0.1:5000
+ * Debug mode: on
+```
+
+---
+
+### STEP 6 — Open the Dashboard
+
+1. Open your browser (Chrome recommended)
+2. Go to: **http://localhost:5000**
+3. The ResearchLens AI dashboard will load! 🎉
+
+---
+
+## 🎯 HOW TO USE THE APP
+
+1. **Enter your Groq API Key** in the first field
+2. **Type your research topic** (e.g., "Machine Learning for Healthcare")
+3. **Upload your paper (PDF)** — optional but gives better results
+4. Click **"Analyze Research Gaps"**
+5. Wait ~30-60 seconds for the analysis
+6. Explore the results across 5 tabs:
+   - **Overview** — Scores, summary, coverage analysis
+   - **Research Gaps** — Detailed gap cards with suggestions
+   - **Knowledge Graph** — Interactive visualization
+   - **Papers** — Related papers found from ArXiv
+   - **Trends** — Publication charts and emerging trends
+7. Click **"Download Report"** to get a professional PDF
+
+---
+
+## 📁 PROJECT STRUCTURE
+
+```
+research_gap_detector/
+│
+├── backend/
+│   └── app.py              ← Flask backend (all API logic)
+│
+├── frontend/
+│   ├── index.html          ← Main dashboard UI
+│   └── static/
+│       ├── css/style.css   ← All styling
+│       └── js/app.js       ← All interactivity
+│
+├── uploads/                ← Uploaded PDFs (auto-created)
+├── reports/                ← Generated reports (auto-created)
+├── requirements.txt        ← Python packages
+└── README.md               ← This file
+```
+
+---
+
+## ✨ KEY FEATURES
+
+| Feature | Description |
+|---------|-------------|
+| 🤖 Agentic AI | Llama 3 70B via Groq — reasons about gaps autonomously |
+| 📄 PDF Analysis | Extracts text from your uploaded research paper |
+| 🌐 ArXiv Fetch | Pulls 15 real-time related papers from ArXiv |
+| 🕸️ Knowledge Graph | Interactive canvas-based graph with hover effects |
+| 📊 Gap Cards | Color-coded by severity (Critical / Major / Moderate) |
+| 📈 Trend Charts | Publication year bar chart + category doughnut |
+| 📋 PDF Report | Professional downloadable report with all findings |
+| 🔍 Paper Search | Search through related papers instantly |
+| 🎨 Dark Dashboard | Futuristic glassmorphism UI |
+
+---
+
+## 🛠️ TROUBLESHOOTING
+
+**"Module not found" error?**
+→ Run: `pip install -r requirements.txt` again
+
+**"Connection refused" or app won't load?**
+→ Make sure `python app.py` is still running in terminal
+
+**API Key error?**
+→ Double-check your Groq key starts with `gsk_`
+
+**ArXiv returns no papers?**
+→ Check your internet connection; try a broader topic
+
+**PDF not being read?**
+→ Make sure it's a text-based PDF, not a scanned image
+
+---
+
+## 📦 REQUIREMENTS
+
+- Python 3.10+
+- Internet connection (for ArXiv + Groq API)
+- Groq API key (free at console.groq.com)
+- Modern browser (Chrome, Firefox, Edge)
+
+---
+
+## 🎓 ACADEMIC USE
+
+This system was built as a **Major Project** for demonstrating:
+- Agentic AI concepts
+- Knowledge Graph construction
+- NLP-based information extraction
+- Research gap analysis methodology
+
+---
+
+*Built with Flask • Groq LLaMA 3 • ArXiv API • Chart.js*

@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>ResearchLens AI — Gap Detection System</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/static/css/style.css"/>
+</head>
+<body>
+<div class="bg-grid"></div>
+<div class="orb orb1"></div>
+<div class="orb orb2"></div>
+<div class="orb orb3"></div>
+
+<!-- NAVBAR -->
+<nav class="navbar">
+  <div class="nav-brand">
+    <div class="brand-icon">
+      <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+        <circle cx="14" cy="14" r="5" fill="#00d4ff"/>
+        <circle cx="14" cy="4" r="3" fill="#7c3aed"/>
+        <circle cx="23" cy="19" r="3" fill="#06ffa5"/>
+        <circle cx="5" cy="19" r="3" fill="#ff6b6b"/>
+        <line x1="14" y1="9" x2="20" y2="16" stroke="#00d4ff" stroke-width="1.5"/>
+        <line x1="14" y1="9" x2="8" y2="16" stroke="#00d4ff" stroke-width="1.5"/>
+        <line x1="14" y1="19" x2="20" y2="16" stroke="#06ffa5" stroke-width="1.5"/>
+        <line x1="14" y1="19" x2="8" y2="16" stroke="#ff6b6b" stroke-width="1.5"/>
+      </svg>
+    </div>
+    <span class="brand-name">ResearchLens<span class="brand-ai"> AI</span></span>
+  </div>
+  <div class="nav-tags">
+    <span class="tag">Agentic AI</span>
+    <span class="tag">Knowledge Graph</span>
+    <span class="tag">Gap Detection</span>
+  </div>
+  <div class="nav-right">
+    <button class="logout-btn" style="background:rgba(181,117,138,0.1);border-color:rgba(181,117,138,0.3);color:var(--purple)" onclick="openWorkspaceModal()">👥 Team Workspace</button>
+    <button class="logout-btn" style="background:rgba(107,163,116,0.1);border-color:rgba(107,163,116,0.3);color:var(--green)" onclick="openCommunityModal()">🌍 Community Gaps</button>
+    <button class="logout-btn" style="background:rgba(228,112,63,0.1);border-color:rgba(228,112,63,0.3);color:var(--cyan)" onclick="openEvalModal()">📊 Accuracy Dashboard</button>
+    <button class="logout-btn" style="background:rgba(0,212,255,0.1);border-color:rgba(0,212,255,0.3);color:var(--cyan)" onclick="window.location.href='/explorer'">🧭 Publication Explorer</button>
+    <div class="user-info" id="userInfo" style="display:none;cursor:pointer" onclick="openProfile()">
+      <img class="user-avatar" id="userAvatar" src="" alt="" style="cursor:pointer"/>
+      <span class="user-name" id="userName" style="cursor:pointer"></span>
+      <span class="profile-arrow">▾</span>
+    </div>
+    <div class="nav-status">
+      <span class="status-dot"></span>
+      <span class="status-text">System Ready</span>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-globe" id="heroGlobe"></div>
+  <div class="hero-content">
+    <div class="hero-label">AUTONOMOUS RESEARCH INTELLIGENCE</div>
+    <h1 class="hero-title">Discover What<br/><span class="gradient-text">Science Hasn't</span><br/>Explored Yet</h1>
+    <p class="hero-sub">Upload your research papers. Our Agentic AI maps the knowledge graph, scans thousands of publications, and pinpoints exact gaps with verifiable evidence.</p>
+    <div class="hero-stats">
+      <div class="stat"><span class="stat-num">1M+</span><span class="stat-label">Papers Indexed</span></div>
+      <div class="stat-divider"></div>
+      <div class="stat"><span class="stat-num">5</span><span class="stat-label">Papers at Once</span></div>
+      <div class="stat-divider"></div>
+      <div class="stat"><span class="stat-num">100%</span><span class="stat-label">Evidence Backed</span></div>
+    </div>
+    <div class="hero-caption">
+      <span class="hero-caption-icon">🔎</span>
+      <span>Every gap comes with a citation trail back to the source papers — powered by agentic multi-step reasoning across dozens of academic publication sources.</span>
+    </div>
+  </div>
+</section>
+
+<!-- BLEND: fades hero's darker tone into the section below so there's no hard brightness step -->
+<div class="hero-blend"></div>
+
+<!-- SCOPE STEPS -->
+<div class="scope-steps">
+  <div class="scope-step active" id="stepScope">
+    <span class="scope-step-num">1</span>
+    <span class="scope-step-label">Publication Scope</span>
+  </div>
+  <div class="scope-step-line"></div>
+  <div class="scope-step" id="stepAnalysis">
+    <span class="scope-step-num">2</span>
+    <span class="scope-step-label">Start Analysis</span>
+  </div>
+</div>
+
+<!-- INPUT SECTION -->
+<section class="input-section">
+  <div class="wizard-flow" style="grid-column:1 / -1">
+    <div class="card glass-card form-card wizard-card active" id="pubScopeCard">
+    <div class="card-header">
+      <div class="card-icon cyan">🧭</div>
+      <div>
+        <h2 class="card-title" style="font-size:1.1rem">Publication Scope <span class="optional-badge">Optional</span></h2>
+        <p class="card-sub">Primary Domain → Secondary Domain → Research Topic (above) → Research Papers</p>
+      </div>
+    </div>
+
+    <div class="field-group">
+      <label class="field-label"><span class="label-icon">🎯</span> Primary Domain</label>
+      <select id="primaryDomainSelect" class="field-input">
+        <option value="">Auto-detect from topic</option>
+      </select>
+    </div>
+
+    <div class="field-group">
+      <label class="field-label"><span class="label-icon">🧩</span> Secondary Domain</label>
+      <select id="secondaryDomainSelect" class="field-input" disabled>
+        <option value="">Select a Primary Domain first</option>
+      </select>
+      <div id="secondaryDomainHint" style="font-size:0.72rem;color:var(--text3);margin-top:0.3rem"></div>
+    </div>
+
+    <div class="field-group">
+      <label class="field-label"><span class="label-icon">📚</span> Research Papers — Sources to Search</label>
+      <div class="pe-source-row">
+        <label class="pe-source-chip"><input type="checkbox" class="paperSourceCb" value="ArXiv" checked/> arXiv</label>
+        <label class="pe-source-chip"><input type="checkbox" class="paperSourceCb" value="Semantic Scholar" checked/> Semantic Scholar</label>
+        <label class="pe-source-chip"><input type="checkbox" class="paperSourceCb" value="OpenAlex" checked/> OpenAlex</label>
+      </div>
+      <div id="recommendedSourcesBlock" style="display:none;margin-top:0.9rem">
+        <div style="font-size:0.78rem;color:var(--cyan);font-weight:600;margin-bottom:0.5rem" id="recommendedSourcesLabel"></div>
+        <div class="pe-source-row" id="recommendedSourcesRow"></div>
+        <div id="recommendedSourcesNote" style="font-size:0.72rem;color:var(--text3);margin-top:0.5rem"></div>
+      </div>
+      <div id="specificVenuesBlock" style="display:none;margin-top:0.9rem">
+        <div style="font-size:0.78rem;color:var(--cyan);font-weight:600;margin-bottom:0.5rem">Specific venues for your domain</div>
+        <div class="pe-source-row" id="specificVenuesRow"></div>
+        <div style="font-size:0.72rem;color:var(--text3);margin-top:0.5rem">Checking these restricts Semantic Scholar's results to that exact venue — only shown here because these are real, specific, filterable venue names (unlike umbrella publisher names such as "IEEE" or "ACM", which Semantic Scholar can't filter by and aren't shown as checkboxes for that reason). Coverage of papers published under those larger publishers still comes through the sources above.</div>
+        <div id="strictVenueNotice" style="display:none;margin-top:0.6rem;padding:0.7rem;background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.3);border-radius:8px;font-size:0.76rem;color:var(--cyan)"></div>
+      </div>
+      <input type="hidden" id="paperSourcesInput" value=""/>
+      <input type="hidden" id="venueFilterInput" value=""/>
+      <div style="font-size:0.72rem;color:var(--text3);margin-top:0.4rem">These are the only literature sources this app actually queries — unchecking one means it's genuinely skipped.</div>
+    </div>
+    <div class="wizard-actions">
+      <button type="button" class="wizard-continue-btn" onclick="wizardGoTo('analysis')">
+        Continue to Start Analysis <span class="wizard-arrow">→</span>
+      </button>
+    </div>
+  </div>
+    <div class="card glass-card form-card wizard-card" id="startAnalysisCard" style="display:none">
+    <button type="button" class="wizard-back-btn" onclick="wizardGoTo('scope')">← Back to Publication Scope</button>
+    <div class="card-header">
+      <div class="card-icon cyan">⚡</div>
+      <div>
+        <h2 class="card-title">Start Analysis</h2>
+        <p class="card-sub">Single paper or multi-paper comparative analysis</p>
+      </div>
+    </div>
+
+    <!-- Mode Toggle -->
+    <div class="mode-toggle">
+      <button class="mode-btn active" id="modeSingle" onclick="switchMode('single')">
+        📄 Single Paper
+      </button>
+      <button class="mode-btn" id="modeMulti" onclick="switchMode('multi')">
+        📚 Multi-Paper (up to 5)
+      </button>
+    </div>
+
+    <form id="analysisForm">
+      <!-- API Key -->
+      <div class="field-group">
+        <label class="field-label">
+          <span class="label-icon">🔑</span> Groq API Key
+          <a href="https://console.groq.com" target="_blank" class="label-link">Get free key →</a>
+        </label>
+        <div class="input-wrap">
+          <input type="password" id="apiKey" class="field-input" placeholder="gsk_••••••••••••••••••••••"/>
+          <button type="button" class="toggle-eye" onclick="togglePassword()">👁</button>
+        </div>
+      </div>
+
+      <!-- Topic -->
+      <div class="field-group">
+        <label class="field-label"><span class="label-icon">🔬</span> Research Topic</label>
+        <input type="text" id="topic" class="field-input" placeholder="e.g., Autonomous Research Gap Detection using Knowledge Graphs"/>
+      </div>
+
+      <!-- Idea Description -->
+      <div class="field-group">
+        <label class="field-label"><span class="label-icon">📝</span> Describe Your Idea <span class="optional-badge">Optional</span></label>
+        <textarea id="ideaDescription" class="field-input" rows="3" style="resize:vertical;font-family:var(--font-main)" placeholder="Add more context about your research idea — the problem, approach, or angle you're exploring. This helps the AI understand your idea more precisely."></textarea>
+      </div>
+
+      <!-- Single PDF Upload -->
+      <div class="field-group" id="singleUpload">
+        <label class="field-label"><span class="label-icon">📄</span> Upload Your Paper <span class="optional-badge">Optional</span></label>
+        <div class="upload-zone" id="uploadZone">
+          <div class="upload-content" id="uploadContent">
+            <div class="upload-icon">📎</div>
+            <div class="upload-text">Drop your PDF here or <span class="upload-link">browse</span></div>
+            <div class="upload-hint">Single PDF up to 20MB</div>
+          </div>
+          <input type="file" id="pdfInput" accept=".pdf" hidden/>
+        </div>
+      </div>
+
+      <!-- Multi PDF Upload -->
+      <div class="field-group" id="multiUpload" style="display:none">
+        <label class="field-label"><span class="label-icon">📚</span> Upload Multiple Papers <span class="required-badge">Required • Max 5</span></label>
+        <div class="upload-zone multi-zone" id="multiUploadZone">
+          <div class="upload-content" id="multiUploadContent">
+            <div class="upload-icon">📚</div>
+            <div class="upload-text">Drop up to 5 PDFs here or <span class="upload-link">browse</span></div>
+            <div class="upload-hint">Each PDF up to 20MB • Generates literature review + comparison table</div>
+          </div>
+          <input type="file" id="multiPdfInput" accept=".pdf" multiple hidden/>
+        </div>
+        <div class="file-list" id="fileList"></div>
+      </div>
+
+      <button type="submit" class="analyze-btn" id="analyzeBtn">
+        <span class="btn-content">
+          <span class="btn-icon">🧠</span>
+          <span class="btn-text">Analyze Research Gaps</span>
+        </span>
+        <div class="btn-glow"></div>
+      </button>
+    </form>
+  </div>
+  </div>
+
+  <!-- How it works -->
+  <div class="how-it-works" style="grid-column:1 / -1;max-width:1040px;margin:2rem auto 0">
+    <h3 class="how-title">How It Works</h3>
+    <div class="steps">
+      <div class="step"><div class="step-num">01</div><div class="step-text"><b>Upload</b> — 1 or up to 5 research papers</div></div>
+      <div class="step"><div class="step-num">02</div><div class="step-text"><b>Extract</b> — NLP extracts keywords, topics & entities</div></div>
+      <div class="step"><div class="step-num">03</div><div class="step-text"><b>Map</b> — Builds an interactive knowledge graph</div></div>
+      <div class="step"><div class="step-num">04</div><div class="step-text"><b>Detect</b> — Agentic AI identifies gaps with evidence</div></div>
+      <div class="step"><div class="step-num">05</div><div class="step-text"><b>Prove</b> — Click 🔗 on each gap to see proof</div></div>
+      <div class="step"><div class="step-num">06</div><div class="step-text"><b>Report</b> — Download PDF with full evidence chain</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- LOADING -->
+<div class="loading-overlay" id="loadingOverlay" style="display:none">
+  <div class="loading-card">
+    <div class="loading-orb"></div>
+    <h3 class="loading-title">Analyzing Research Landscape</h3>
+    <div class="loading-steps">
+      <div class="lstep" id="ls1">📡 Fetching papers from ArXiv...</div>
+      <div class="lstep" id="ls2">🧩 Extracting concepts & keywords...</div>
+      <div class="lstep" id="ls3">🕸️ Building knowledge graph...</div>
+      <div class="lstep" id="ls4">🤖 Running Agentic AI analysis...</div>
+      <div class="lstep" id="ls5">📋 Generating report with evidence...</div>
+    </div>
+    <div class="loading-bar-wrap"><div class="loading-bar" id="loadingBar"></div></div>
+  </div>
+</div>
+
+<!-- RESULTS -->
+<section class="results-section" id="resultsSection" style="display:none">
+  <div class="results-nav">
+    <h2 class="results-title">Analysis Complete</h2>
+    <div class="results-tabs">
+      <button class="rtab active" data-tab="overview">Overview</button>
+      <button class="rtab" data-tab="gaps">Research Gaps</button>
+      <button class="rtab" data-tab="graph">Knowledge Graph</button>
+      <button class="rtab" data-tab="papers">Papers</button>
+      <button class="rtab" data-tab="trends">Trends</button>
+      <button class="rtab multi-tab" data-tab="literature" style="display:none">Literature Review</button>
+      <button class="rtab multi-tab" data-tab="summaries" style="display:none">Paper Summaries</button>
+    </div>
+    <button class="watch-btn" id="watchBtn" onclick="toggleWatch()">🔔 Track Live Updates</button>
+    <button class="download-btn" id="downloadBtn">⬇ Download Report</button>
+  </div>
+
+  <!-- Overview Tab -->
+  <div class="tab-content active" id="tab-overview">
+    <div class="overview-grid">
+      <div class="metric-card"><div class="metric-label">Novelty Score</div><div class="metric-value" id="noveltyScore">—</div><div class="metric-bar"><div class="metric-fill" id="noveltyFill"></div></div><div class="metric-sub">Research originality</div></div>
+      <div class="metric-card"><div class="metric-label">Gaps Found</div><div class="metric-value" id="gapsCount">—</div><div class="metric-bar"><div class="metric-fill cyan-fill" id="gapsFill"></div></div><div class="metric-sub">Unexplored areas</div></div>
+      <div class="metric-card"><div class="metric-label">Papers Analyzed</div><div class="metric-value" id="papersCount">—</div><div class="metric-bar"><div class="metric-fill green-fill" id="papersFill"></div></div><div class="metric-sub">From databases</div></div>
+      <div class="metric-card"><div class="metric-label">Gap Density</div><div class="metric-value" id="gapDensity">—</div><div class="metric-bar"><div class="metric-fill orange-fill" id="densityFill"></div></div><div class="metric-sub">Research opportunity</div></div>
+    </div>
+    <div class="card glass-card" style="margin-top:1.5rem">
+      <div class="card-header"><div class="card-icon purple">📋</div><h3 class="card-title">Executive Summary</h3></div>
+      <p class="summary-text" id="summaryText"></p>
+    </div>
+    <div class="card recommendation-card" style="margin-top:1.5rem">
+      <div class="rec-icon">💡</div>
+      <div><div class="rec-label">AI Recommendation</div><p class="rec-text" id="recText"></p></div>
+    </div>
+
+    <!-- Novelty Checker -->
+    <div class="card glass-card" style="margin-top:1.5rem">
+      <div class="card-header"><div class="card-icon purple">🧪</div><h3 class="card-title">Check Your Idea's Novelty</h3></div>
+      <p class="prf-explanation" style="margin-bottom:1rem">Describe a research idea and see how closely it overlaps with the papers just fetched for this topic — plus an AI read on whether it's genuinely novel.</p>
+      <textarea id="noveltyIdeaInput" class="field-input" rows="3" style="resize:vertical;font-family:var(--font-main);width:100%" placeholder="Describe your research idea — the problem, approach, or angle you're exploring..."></textarea>
+      <button class="gen-litreview-btn" style="margin-top:0.75rem" onclick="checkNovelty()" id="noveltyCheckBtn">
+        🧪 Check Novelty Against Fetched Papers
+      </button>
+      <div id="noveltyCheckOutput" style="margin-top:1rem"></div>
+    </div>
+
+    <div class="card glass-card" style="margin-top:1.5rem">
+      <div class="card-header"><div class="card-icon green">📊</div><h3 class="card-title">Research Coverage Analysis</h3></div>
+      <div class="coverage-table-wrap">
+        <table class="coverage-table">
+          <thead><tr><th>Research Area</th><th>Coverage</th><th>Description</th></tr></thead>
+          <tbody id="coverageBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Gaps Tab -->
+  <div class="tab-content" id="tab-gaps">
+    <div class="gaps-header">
+      <h3 class="section-title">Identified Research Gaps</h3>
+      <div class="gap-filters">
+        <button class="gf-btn active" data-sev="all">All</button>
+        <button class="gf-btn critical" data-sev="critical">Critical</button>
+        <button class="gf-btn major" data-sev="major">Major</button>
+        <button class="gf-btn moderate" data-sev="moderate">Moderate</button>
+      </div>
+    </div>
+    <div class="gaps-grid" id="gapsGrid"></div>
+
+    <!-- Gap Proof Section -->
+    <div class="proof-section" id="proofSection" style="display:none">
+      <div class="proof-header">
+        <div class="proof-title-row">
+          <span class="proof-icon">🔬</span>
+          <h3 class="proof-title" id="proofTitle">Gap Evidence & Proof</h3>
+          <button class="proof-close" onclick="closeProof()">✕ Close</button>
+        </div>
+        <p class="proof-subtitle">Scientific evidence proving this research gap exists</p>
+      </div>
+      <div class="proof-content" id="proofContent"></div>
+    </div>
+
+    <div class="card glass-card" style="margin-top:2rem">
+      <div class="card-header"><div class="card-icon cyan">🚀</div><h3 class="card-title">Recommended Next Steps</h3></div>
+      <ol class="next-steps" id="nextSteps"></ol>
+    </div>
+  </div>
+
+  <!-- Graph Tab -->
+  <div class="tab-content" id="tab-graph">
+    <div class="graph-controls">
+      <h3 class="section-title">Interactive Knowledge Graph</h3>
+      <div class="graph-legend">
+        <span class="leg-item"><span class="leg-dot" style="background:#c9a24b"></span> Concept</span>
+        <span class="leg-item"><span class="leg-dot" style="background:#6b4fd6"></span> Paper</span>
+        <span class="leg-item"><span class="leg-dot" style="background:#ff4757"></span> Gap</span>
+        <span class="leg-item"><span class="leg-dot" style="background:#3fae8a"></span> Author</span>
+        <span class="leg-item"><span class="leg-dot" style="background:#e8c468"></span> Trend</span>
+        <button class="tt-btn" style="flex:0 0 auto;margin-left:0.5rem" id="graphFocusToggle" onclick="toggleGraphFocus()">&#128269; Show All Nodes</button>
+      </div>
+    </div>
+    <div class="graph-layout">
+      <div class="graph-main">
+        <div class="card glass-card graph-card">
+          <canvas id="graphCanvas"></canvas>
+          <div class="graph-node-panel" id="graphNodePanel" style="display:none"></div>
+          <div class="graph-hint">Drag nodes to rearrange &bull; Click a node for details &bull; Hover to trace connections</div>
+        </div>
+        <div class="card glass-card" style="margin-top:1rem">
+          <div class="card-header"><div class="card-icon green">&#129517;</div><h3 class="card-title">Suggested Unexplored Combinations</h3></div>
+          <div id="suggestedGapsList"></div>
+        </div>
+        <div class="card glass-card" style="margin-top:1rem">
+          <div class="card-header"><div class="card-icon cyan">&#127991;</div><h3 class="card-title">Key Concepts in Graph</h3></div>
+          <div class="keyword-cloud" id="keywordCloud"></div>
+        </div>
+      </div>
+      <div class="graph-qa-panel card glass-card">
+        <div class="qa-panel-header">
+          <div class="qa-panel-icon">&#129302;</div>
+          <div>
+            <div class="qa-panel-title">Ask the Knowledge Graph</div>
+            <div class="qa-panel-sub">AI answers questions about research connections</div>
+          </div>
+        </div>
+        <div class="qa-quick-questions">
+          <div class="qa-qq-label">Quick questions:</div>
+          <button class="qa-qq-btn" onclick="askQuickQuestion('Which topics are most connected?')">Most connected topics?</button>
+          <button class="qa-qq-btn" onclick="askQuickQuestion('What research areas appear isolated?')">Isolated areas?</button>
+          <button class="qa-qq-btn" onclick="askQuickQuestion('What are the strongest research clusters?')">Research clusters?</button>
+          <button class="qa-qq-btn" onclick="askQuickQuestion('Which paper connects most concepts?')">Most connected paper?</button>
+        </div>
+        <div class="qa-messages" id="graphQAMessages"></div>
+        <div class="qa-input-row">
+          <input type="text" id="graphQAInput" class="qa-input" placeholder="Ask about the knowledge graph..." onkeydown="if(event.key==='Enter') askGraphQA()"/>
+          <button class="qa-send-btn" onclick="askGraphQA()">&#10148;</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Papers Tab -->
+  <div class="tab-content" id="tab-papers">
+    <div class="card-header" style="margin-bottom:1rem">
+      <h3 class="section-title">Related Papers Found</h3>
+      <input type="text" class="search-input" id="paperSearch" placeholder="Search papers..."/>
+    </div>
+    <div class="papers-grid" id="papersGrid"></div>
+  </div>
+
+  <!-- Trends Tab -->
+  <div class="tab-content" id="tab-trends">
+    <!-- Gap Leaderboard -->
+    <div class="leaderboard-header">
+      <div>
+        <h3 class="section-title">🏆 Global Research Gap Leaderboard</h3>
+        <p style="font-size:0.85rem;color:var(--text2);margin-top:0.3rem">Most critical research gaps detected across all topics — ranked by severity & community interest</p>
+      </div>
+      <div class="lb-live-badge"><span class="lb-pulse"></span> Live from this analysis</div>
+    </div>
+    <div class="leaderboard-grid" id="leaderboardGrid"></div>
+
+    <!-- Charts row (compact) -->
+    <div class="trends-row" style="margin-top:1.5rem">
+      <div class="card glass-card chart-card">
+        <div class="card-header"><div class="card-icon orange">📈</div><h3 class="card-title">Publications by Year</h3></div>
+        <canvas id="yearChart"></canvas>
+      </div>
+      <div class="card glass-card chart-card">
+        <div class="card-header"><div class="card-icon purple">🗂️</div><h3 class="card-title">Research Categories</h3></div>
+        <canvas id="catChart"></canvas>
+      </div>
+    </div>
+
+    <div class="card glass-card" style="margin-top:1.5rem">
+      <div class="card-header"><div class="card-icon green">📡</div><h3 class="card-title">Emerging Trends</h3></div>
+      <div class="trends-grid" id="trendsGrid"></div>
+    </div>
+  </div>
+
+  <!-- Literature Review Tab (multi-paper only) -->
+  <div class="tab-content" id="tab-literature">
+    <div class="card glass-card">
+      <div class="card-header"><div class="card-icon purple">📖</div><h3 class="card-title">Auto-Generated Literature Review</h3></div>
+      <div class="lit-review" id="litReview"></div>
+    </div>
+  </div>
+
+  <!-- Paper Summaries Tab (multi-paper only) -->
+  <div class="tab-content" id="tab-summaries">
+    <h3 class="section-title" style="margin-bottom:1.5rem">Individual Paper Summaries</h3>
+    <div id="paperSummaries"></div>
+    <!-- Comparative Table -->
+    <div class="card glass-card" style="margin-top:1.5rem">
+      <div class="card-header"><div class="card-icon cyan">📊</div><h3 class="card-title">Comparative Analysis Table</h3></div>
+      <div class="coverage-table-wrap" id="compareTableWrap"></div>
+    </div>
+  </div>
+
+</section>
+
+<footer class="footer">
+  <p>ResearchLens AI — Autonomous Research Gap Detection System &nbsp;|&nbsp; Powered by Groq LLaMA 3 + ArXiv API</p>
+</footer>
+
+<!-- Upgrade Prompt Modal -->
+<div class="upgrade-overlay" id="upgradePrompt" style="display:none" onclick="if(event.target===this)closeUpgradePrompt()">
+  <div class="upgrade-modal">
+    <button class="upgrade-close" onclick="closeUpgradePrompt()">x</button>
+    <div class="upgrade-icon">locked</div>
+    <h3 class="upgrade-title">Multi-Paper Upload is Premium</h3>
+    <p class="upgrade-sub">Upgrade to analyze up to 5 papers, generate literature reviews, and get comparative analysis tables.</p>
+    <div class="upgrade-plans">
+      <div class="up-plan">
+        <div class="up-plan-name">Student</div>
+        <div class="up-plan-price">299/mo</div>
+        <div class="up-plan-features">
+          <div>50 analyses/month</div>
+          <div>Multi-paper (up to 5)</div>
+          <div>Literature review</div>
+          <div>Comparison tables</div>
+        </div>
+        <button class="up-plan-btn" onclick="activatePlan('student')">Activate Student Plan</button>
+      </div>
+      <div class="up-plan premium">
+        <div class="up-plan-badge">Best Value</div>
+        <div class="up-plan-name">Researcher</div>
+        <div class="up-plan-price">799/mo</div>
+        <div class="up-plan-features">
+          <div>Unlimited analyses</div>
+          <div>All Student features</div>
+          <div>API access</div>
+          <div>Priority support</div>
+        </div>
+        <button class="up-plan-btn gold" onclick="activatePlan('researcher')">Activate Researcher Plan</button>
+      </div>
+    </div>
+    <p class="upgrade-demo-note">Demo mode: clicking activates the plan locally for testing</p>
+  </div>
+</div>
+
+<!-- Profile Modal -->
+<div class="profile-overlay" id="profileOverlay" onclick="closeProfile()"></div>
+<div class="profile-modal" id="profileModal">
+  <div class="profile-modal-header">
+    <h3 class="profile-modal-title">My Profile</h3>
+    <button class="profile-close" onclick="closeProfile()">✕</button>
+  </div>
+
+  <!-- User Info -->
+  <div class="profile-user-section">
+    <div class="profile-avatar-large" id="profileAvatarLarge"></div>
+    <div class="profile-user-details">
+      <div class="profile-name" id="profileName">—</div>
+      <div class="profile-email" id="profileEmail">—</div>
+      <div class="profile-badge free">🆓 Free Plan</div>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="profile-stats">
+    <div class="profile-stat"><div class="profile-stat-num" id="statAnalyses">0</div><div class="profile-stat-label">Analyses Done</div></div>
+    <div class="profile-stat"><div class="profile-stat-num">∞</div><div class="profile-stat-label">Papers Scanned</div></div>
+    <div class="profile-stat"><div class="profile-stat-num">Free</div><div class="profile-stat-label">Current Plan</div></div>
+  </div>
+
+  <!-- Subscription Plans -->
+  <div class="profile-section-title">🚀 Upgrade Your Plan</div>
+  <div class="plans-grid">
+    <!-- Free -->
+    <div class="plan-card active-plan">
+      <div>
+        <div class="plan-name">🆓 Free</div>
+        <div class="plan-price">₹0/mo</div>
+      </div>
+      <div class="plan-features">
+        <div class="plan-feature">✅ 5 analyses/mo</div>
+        <div class="plan-feature">✅ Single paper</div>
+        <div class="plan-feature">❌ Multi-paper</div>
+      </div>
+      <div class="plan-current-badge">✓ Current</div>
+    </div>
+    <!-- Student -->
+    <div class="plan-card">
+      <div>
+        <div class="plan-name">🔥 Student</div>
+        <div class="plan-price" style="color:#ff9f43">₹299/mo</div>
+      </div>
+      <div class="plan-features">
+        <div class="plan-feature">✅ 50 analyses/mo</div>
+        <div class="plan-feature">✅ Multi-paper</div>
+        <div class="plan-feature">✅ Literature review</div>
+      </div>
+      <button class="plan-upgrade-btn" onclick="handleUpgrade('student')">Upgrade</button>
+    </div>
+    <!-- Researcher -->
+    <div class="plan-card premium-plan">
+      <div>
+        <div class="plan-name">⭐ Researcher</div>
+        <div class="plan-price" style="color:#ffd700">₹799/mo</div>
+      </div>
+      <div class="plan-features">
+        <div class="plan-feature">✅ Unlimited</div>
+        <div class="plan-feature">✅ API access</div>
+        <div class="plan-feature">✅ Priority support</div>
+      </div>
+      <button class="plan-upgrade-btn gold" onclick="handleUpgrade('researcher')">Upgrade</button>
+    </div>
+  </div>
+
+  <!-- Tracked Topics (Real-Time Watch) -->
+  <div class="profile-section-title" style="margin-top:1.5rem">🔔 Live Tracked Topics <span class="live-count-badge" id="liveCountBadge">0</span></div>
+  <div class="tracked-topics" id="trackedTopicsList">
+    <div style="color:var(--text3);font-size:0.85rem;text-align:center;padding:1rem">No topics tracked yet — click "Track Live Updates" after an analysis</div>
+  </div>
+
+  <!-- History -->
+  <div class="profile-section-title" style="margin-top:1.5rem">📋 Recent Activity</div>
+  <div class="profile-history" id="profileHistory">
+    <div style="color:var(--text3);font-size:0.85rem;text-align:center;padding:1rem">No analyses yet — run your first analysis above!</div>
+  </div>
+
+  <button class="profile-logout-btn" onclick="logout()">Sign Out</button>
+</div>
+
+<!-- Team Workspace Modal -->
+<div class="profile-overlay" id="workspaceOverlay" onclick="closeWorkspaceModal()"></div>
+<div class="profile-modal" id="workspaceModal">
+  <div class="profile-modal-header">
+    <h3 class="profile-modal-title">👥 Team Workspace</h3>
+    <button class="profile-close" onclick="closeWorkspaceModal()">✕</button>
+  </div>
+
+  <div id="workspaceNotJoined">
+    <div class="profile-section-title">Create a Workspace</div>
+    <input type="text" id="wsCreateName" class="field-input" placeholder="Workspace name" style="margin-bottom:0.6rem"/>
+    <input type="text" id="wsCreateDisplayName" class="field-input" placeholder="Your display name" style="margin-bottom:0.6rem"/>
+    <button class="plan-upgrade-btn" style="width:100%;margin-bottom:1.5rem" onclick="createWorkspace()">Create Workspace</button>
+
+    <div class="profile-section-title">Join a Workspace</div>
+    <input type="text" id="wsJoinCode" class="field-input" placeholder="Join code" style="margin-bottom:0.6rem"/>
+    <input type="text" id="wsJoinDisplayName" class="field-input" placeholder="Your display name" style="margin-bottom:0.6rem"/>
+    <button class="plan-upgrade-btn" style="width:100%" onclick="joinWorkspaceFromModal()">Join Workspace</button>
+  </div>
+
+  <div id="workspaceJoined" style="display:none">
+    <div class="profile-section-title">
+      <span id="wsName">—</span> &nbsp;
+      <span style="color:var(--text3);font-weight:400">Join code: <span id="wsJoinCodeDisplay">—</span></span>
+    </div>
+
+    <div class="profile-section-title" style="margin-top:1rem">Dashboard</div>
+    <div id="wsDashboard" style="font-size:0.85rem;margin-bottom:1rem">Loading...</div>
+
+    <div class="profile-section-title">Shared Library</div>
+    <div id="wsLibrary" style="margin-bottom:1rem">Loading...</div>
+
+    <button class="plan-upgrade-btn" style="width:100%;margin-bottom:0.6rem" onclick="contributeToWorkspace()">Contribute Current Analysis</button>
+    <button class="profile-logout-btn" onclick="leaveWorkspace()">Leave Workspace</button>
+  </div>
+</div>
+
+<!-- Community Gaps Modal -->
+<div class="profile-overlay" id="communityOverlay" onclick="closeCommunityModal()"></div>
+<div class="profile-modal" id="communityModal">
+  <div class="profile-modal-header">
+    <h3 class="profile-modal-title">🌍 Community Gaps</h3>
+    <button class="profile-close" onclick="closeCommunityModal()">✕</button>
+  </div>
+
+  <div style="display:flex;gap:0.5rem;margin-bottom:1rem">
+    <input type="text" id="communitySearch" class="field-input" placeholder="Search shared gaps..." onkeydown="if(event.key==='Enter')loadCommunityGaps()"/>
+    <button class="tt-btn" style="flex:0 0 auto" onclick="loadCommunityGaps()">Search</button>
+  </div>
+
+  <div id="communityFeed">Loading...</div>
+</div>
+
+<!-- Accuracy Dashboard Modal -->
+<div class="profile-overlay" id="evalOverlay" onclick="closeEvalModal()"></div>
+<div class="profile-modal" id="evalModal">
+  <div class="profile-modal-header">
+    <h3 class="profile-modal-title">📊 Accuracy Dashboard</h3>
+    <button class="profile-close" onclick="closeEvalModal()">✕</button>
+  </div>
+
+  <div id="evalDashboardContent">Loading...</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="/static/js/hero-globe.js"></script>
+<script src="/static/js/dot-field.js"></script>
+<!-- Auth must load before app.js: it guards this page and patches
+     fetch() so every /api/ call app.js makes carries a real, verified
+     Firebase ID token instead of nothing. Both are type="module" so
+     they execute in document order, deferred until after parsing —
+     the same ordering guarantee as <script defer>. -->
+<script type="module">
+  import '/static/js/firebase-auth.js';
+  const user = await window.rlAuth.requireAuth();
+  if (user) document.body.classList.add('rl-authed');
+</script>
+<script type="module" src="/static/js/app.js"></script>
+<script src="/static/js/publication-scope.js"></script>
+<script>
+  // Wizard flow: only one of the two cards (Publication Scope / Start Analysis)
+  // is visible at a time. wizardGoTo() swaps them and updates the step pills.
+  (function () {
+    const stepScope = document.getElementById('stepScope');
+    const stepAnalysis = document.getElementById('stepAnalysis');
+    const scopeCard = document.getElementById('pubScopeCard');
+    const analysisCard = document.getElementById('startAnalysisCard');
+    if (!stepScope || !stepAnalysis || !scopeCard || !analysisCard) return;
+
+    let reached2 = false; // whether the user has ever continued to step 2 (unlocks clicking step 2 directly)
+
+    window.wizardGoTo = function (which) {
+      if (which === 'analysis') {
+        scopeCard.style.display = 'none';
+        analysisCard.style.display = '';
+        scopeCard.classList.remove('active');
+        analysisCard.classList.add('active');
+        stepScope.classList.remove('active');
+        stepScope.classList.add('done');
+        stepAnalysis.classList.add('active');
+        reached2 = true;
+      } else {
+        analysisCard.style.display = 'none';
+        scopeCard.style.display = '';
+        analysisCard.classList.remove('active');
+        scopeCard.classList.add('active');
+        stepAnalysis.classList.remove('active');
+        stepScope.classList.remove('done');
+        stepScope.classList.add('active');
+      }
+      document.querySelector('.scope-steps').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    };
+
+    stepScope.addEventListener('click', () => window.wizardGoTo('scope'));
+    stepAnalysis.addEventListener('click', () => { if (reached2) window.wizardGoTo('analysis'); });
+    stepScope.style.cursor = 'pointer';
+  })();
+</script>
+</body>
+</html>

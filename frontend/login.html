@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>ResearchLens AI — Research Gap Detection</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Syne:wght@700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#020510;--bg2:#060d1f;--bg3:#0a1528;
+  --cyan:#00d4ff;--purple:#7c3aed;--green:#06ffa5;
+  --orange:#ff9f43;--red:#ff4757;--pink:#ff6b9d;
+  --gold:#ffd700;
+  --text:#f0f4ff;--text2:#8899bb;--text3:#445577;
+  --glass:rgba(255,255,255,0.03);--glass2:rgba(255,255,255,0.06);
+  --border:rgba(255,255,255,0.07);--border2:rgba(0,212,255,0.2);
+  --glow-c:0 0 40px rgba(0,212,255,0.3);
+  --glow-p:0 0 40px rgba(124,58,237,0.3);
+  --font:'Space Grotesk',sans-serif;
+  --font-d:'Syne',sans-serif;
+  --font-m:'JetBrains Mono',monospace;
+}
+html,body{height:100%;overflow-x:hidden}
+body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh}
+
+/* ── Canvas bg ── */
+#particleCanvas{position:fixed;inset:0;z-index:0;pointer-events:none}
+
+/* ── Orbs ── */
+.orb{position:fixed;border-radius:50%;filter:blur(90px);pointer-events:none;z-index:0;animation:orb-drift 15s ease-in-out infinite}
+.o1{width:700px;height:700px;background:radial-gradient(circle,rgba(124,58,237,0.18),transparent 70%);top:-200px;right:-200px;animation-delay:0s}
+.o2{width:600px;height:600px;background:radial-gradient(circle,rgba(0,212,255,0.12),transparent 70%);bottom:-200px;left:-200px;animation-delay:-5s}
+.o3{width:400px;height:400px;background:radial-gradient(circle,rgba(6,255,165,0.08),transparent 70%);top:40%;left:50%;animation-delay:-10s}
+@keyframes orb-drift{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(30px,-40px) scale(1.05)}66%{transform:translate(-20px,30px) scale(0.97)}}
+
+/* ── Navbar ── */
+.nav{position:fixed;top:0;left:0;right:0;z-index:100;padding:0 2.5rem;height:64px;display:flex;align-items:center;justify-content:space-between;background:rgba(2,5,16,0.8);backdrop-filter:blur(24px);border-bottom:1px solid var(--border)}
+.nav-brand{display:flex;align-items:center;gap:0.75rem}
+.nav-logo-wrap{position:relative;width:36px;height:36px}
+.nav-logo-bg{position:absolute;inset:0;border-radius:10px;background:linear-gradient(135deg,var(--cyan),var(--purple));opacity:0.15}
+.nav-logo-svg{position:relative;z-index:1;width:36px;height:36px;display:flex;align-items:center;justify-content:center}
+.nav-name{font-family:var(--font-d);font-size:1.15rem;font-weight:800;letter-spacing:-0.02em}
+.nav-name span{color:var(--cyan)}
+.nav-center{display:flex;align-items:center;gap:0.25rem}
+.nav-pill{font-size:0.7rem;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;padding:0.28rem 0.75rem;border-radius:20px;border:1px solid var(--border);background:var(--glass);color:var(--text2);transition:all 0.2s;cursor:default}
+.nav-pill:hover{border-color:var(--border2);color:var(--cyan);background:rgba(0,212,255,0.06)}
+.nav-right{display:flex;align-items:center;gap:1rem}
+.nav-user{display:flex;align-items:center;gap:0.5rem;padding:0.3rem 0.75rem;border-radius:25px;background:var(--glass2);border:1px solid var(--border);cursor:pointer;font-size:0.82rem;font-weight:600;transition:all 0.2s}
+.nav-user:hover{border-color:var(--border2)}
+.nav-avatar{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,var(--cyan),var(--purple));display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:800;color:white;flex-shrink:0}
+.nav-status{display:flex;align-items:center;gap:0.4rem;font-size:0.75rem;font-weight:600}
+.status-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0.4}}
+.nav-btn{padding:0.45rem 1.1rem;border-radius:20px;border:none;background:linear-gradient(135deg,var(--cyan),var(--purple));color:white;font-family:var(--font);font-weight:700;font-size:0.82rem;cursor:pointer;box-shadow:0 0 20px rgba(0,212,255,0.2);transition:all 0.2s}
+.nav-btn:hover{transform:translateY(-1px);box-shadow:0 0 30px rgba(0,212,255,0.35)}
+
+/* ── HERO ── */
+.hero{position:relative;z-index:1;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:8rem 2rem 4rem;text-align:center}
+.hero-badge{display:inline-flex;align-items:center;gap:0.5rem;padding:0.35rem 1rem;border-radius:25px;background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.2);font-family:var(--font-m);font-size:0.7rem;font-weight:600;letter-spacing:0.1em;color:var(--cyan);text-transform:uppercase;margin-bottom:2rem}
+.badge-pulse{width:6px;height:6px;border-radius:50%;background:var(--cyan);box-shadow:0 0 8px var(--cyan);animation:blink 1.5s infinite}
+.hero-title{font-family:var(--font-d);font-size:clamp(3rem,7vw,6rem);font-weight:900;line-height:1.0;letter-spacing:-0.03em;margin-bottom:1.5rem}
+.title-line1{display:block;color:var(--text)}
+.title-line2{display:block;background:linear-gradient(135deg,var(--cyan) 0%,var(--purple) 40%,var(--pink) 70%,var(--green) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;background-size:200% 200%;animation:gradient-shift 4s ease infinite}
+@keyframes gradient-shift{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
+.title-line3{display:block;color:var(--text)}
+.hero-sub{font-size:1.1rem;color:var(--text2);max-width:580px;line-height:1.75;margin-bottom:3rem}
+.hero-sub b{color:var(--cyan)}
+
+/* Animated counter row */
+.hero-counters{display:flex;align-items:center;justify-content:center;gap:0;margin-bottom:3.5rem;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:16px;overflow:hidden;max-width:600px;width:100%}
+.hc-item{flex:1;padding:1.1rem 1rem;text-align:center;position:relative}
+.hc-item:not(:last-child)::after{content:'';position:absolute;right:0;top:20%;height:60%;width:1px;background:var(--border)}
+.hc-num{font-family:var(--font-d);font-size:1.6rem;font-weight:900;color:var(--cyan);display:block}
+.hc-lbl{font-size:0.68rem;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-top:0.2rem}
+
+/* CTA buttons */
+.hero-ctas{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;justify-content:center;margin-bottom:4rem}
+.cta-primary{display:flex;align-items:center;gap:0.6rem;padding:0.9rem 2.2rem;border-radius:14px;background:linear-gradient(135deg,var(--cyan),var(--purple));border:none;color:white;font-family:var(--font);font-weight:700;font-size:1rem;cursor:pointer;box-shadow:0 8px 32px rgba(0,212,255,0.25),0 0 0 1px rgba(0,212,255,0.1);transition:all 0.25s;position:relative;overflow:hidden}
+.cta-primary::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,rgba(255,255,255,0.15),transparent);opacity:0;transition:opacity 0.2s}
+.cta-primary:hover{transform:translateY(-3px);box-shadow:0 16px 48px rgba(0,212,255,0.35)}
+.cta-primary:hover::before{opacity:1}
+.cta-secondary{display:flex;align-items:center;gap:0.6rem;padding:0.88rem 2rem;border-radius:14px;background:var(--glass2);border:1px solid var(--border);color:var(--text);font-family:var(--font);font-weight:600;font-size:0.95rem;cursor:pointer;transition:all 0.25s}
+.cta-secondary:hover{border-color:var(--border2);background:rgba(0,212,255,0.06);transform:translateY(-2px)}
+
+/* Tech feature grid */
+.hero-features{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;max-width:900px;width:100%}
+@media(max-width:768px){.hero-features{grid-template-columns:1fr}}
+.feat-card{background:var(--glass);border:1px solid var(--border);border-radius:16px;padding:1.25rem;text-align:left;transition:all 0.25s;position:relative;overflow:hidden}
+.feat-card::before{content:'';position:absolute;inset:0;border-radius:16px;background:linear-gradient(135deg,rgba(0,212,255,0.03),transparent);opacity:0;transition:opacity 0.3s}
+.feat-card:hover{border-color:rgba(0,212,255,0.2);transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,0.3)}
+.feat-card:hover::before{opacity:1}
+.feat-icon{font-size:1.4rem;margin-bottom:0.6rem;display:block}
+.feat-name{font-weight:700;font-size:0.9rem;margin-bottom:0.3rem;color:var(--text)}
+.feat-desc{font-size:0.78rem;color:var(--text2);line-height:1.55}
+.feat-tag{display:inline-block;font-family:var(--font-m);font-size:0.6rem;padding:0.15rem 0.5rem;border-radius:6px;background:rgba(0,212,255,0.1);color:var(--cyan);font-weight:600;margin-top:0.5rem;letter-spacing:0.04em}
+
+/* ── HOW IT WORKS ── */
+.how-section{position:relative;z-index:1;padding:6rem 2rem;max-width:1100px;margin:0 auto}
+.section-label{font-family:var(--font-m);font-size:0.7rem;color:var(--cyan);letter-spacing:0.12em;text-transform:uppercase;text-align:center;margin-bottom:0.75rem}
+.section-title{font-family:var(--font-d);font-size:clamp(1.8rem,4vw,2.8rem);font-weight:800;text-align:center;margin-bottom:1rem;letter-spacing:-0.02em}
+.section-sub{text-align:center;color:var(--text2);font-size:0.95rem;max-width:500px;margin:0 auto 3.5rem;line-height:1.7}
+.timeline{display:flex;flex-direction:column;gap:1.5rem;position:relative}
+.timeline::before{content:'';position:absolute;left:28px;top:0;bottom:0;width:1px;background:linear-gradient(to bottom,var(--cyan),var(--purple),transparent);opacity:0.3}
+.tl-item{display:flex;gap:1.5rem;align-items:flex-start}
+.tl-num{width:56px;height:56px;border-radius:14px;background:var(--glass2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-family:var(--font-d);font-size:1rem;font-weight:900;flex-shrink:0;position:relative;z-index:1;transition:all 0.2s}
+.tl-item:hover .tl-num{border-color:var(--border2);background:rgba(0,212,255,0.08);color:var(--cyan)}
+.tl-body{background:var(--glass);border:1px solid var(--border);border-radius:14px;padding:1.1rem 1.25rem;flex:1;transition:all 0.2s}
+.tl-item:hover .tl-body{border-color:rgba(0,212,255,0.12)}
+.tl-title{font-weight:700;font-size:0.95rem;margin-bottom:0.3rem}
+.tl-desc{font-size:0.83rem;color:var(--text2);line-height:1.55}
+.tl-badge{font-family:var(--font-m);font-size:0.62rem;padding:0.15rem 0.5rem;border-radius:5px;background:rgba(124,58,237,0.15);color:var(--purple);font-weight:600;margin-left:0.5rem;vertical-align:middle}
+
+/* ── LOGIN MODAL ── */
+.login-overlay{position:fixed;inset:0;background:rgba(2,5,16,0.85);backdrop-filter:blur(12px);z-index:300;display:none;align-items:center;justify-content:center}
+.login-overlay.show{display:flex}
+.login-modal{position:relative;width:92%;max-width:420px;background:rgba(6,13,31,0.98);border:1px solid rgba(0,212,255,0.15);border-radius:24px;padding:2.5rem;box-shadow:0 0 0 1px rgba(0,212,255,0.05),0 40px 80px rgba(0,0,0,0.6),var(--glow-c);animation:modal-in 0.3s ease}
+@keyframes modal-in{from{opacity:0;transform:translateY(24px) scale(0.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+.modal-glow{position:absolute;top:-1px;left:20%;right:20%;height:1px;background:linear-gradient(90deg,transparent,var(--cyan),transparent)}
+.modal-close{position:absolute;top:1.1rem;right:1.1rem;background:var(--glass2);border:1px solid var(--border);border-radius:8px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text2);font-size:0.9rem;transition:all 0.2s}
+.modal-close:hover{border-color:var(--red);color:var(--red)}
+.modal-icon{width:48px;height:48px;border-radius:14px;background:linear-gradient(135deg,rgba(0,212,255,0.15),rgba(124,58,237,0.15));border:1px solid rgba(0,212,255,0.2);display:flex;align-items:center;justify-content:center;font-size:1.3rem;margin-bottom:1rem}
+.modal-title{font-family:var(--font-d);font-size:1.5rem;font-weight:800;margin-bottom:0.3rem}
+.modal-sub{font-size:0.83rem;color:var(--text2);margin-bottom:1.5rem}
+.auth-tabs{display:flex;background:rgba(255,255,255,0.04);border-radius:10px;padding:3px;margin-bottom:1.5rem;gap:3px}
+.auth-tab{flex:1;padding:0.5rem;border-radius:7px;border:none;background:none;cursor:pointer;font-family:var(--font);font-size:0.82rem;font-weight:600;color:var(--text2);transition:all 0.2s}
+.auth-tab.active{background:rgba(255,255,255,0.07);border:1px solid rgba(0,212,255,0.25);color:var(--cyan)}
+.field-group{margin-bottom:1rem}
+.field-label{display:block;font-size:0.78rem;font-weight:700;margin-bottom:0.4rem;color:var(--text2);letter-spacing:0.03em;text-transform:uppercase}
+.field-input{width:100%;padding:0.75rem 1rem;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:var(--text);font-family:var(--font);font-size:0.9rem;outline:none;transition:all 0.2s}
+.field-input:focus{border-color:var(--cyan);background:rgba(0,212,255,0.04);box-shadow:0 0 0 3px rgba(0,212,255,0.08)}
+.field-input::placeholder{color:var(--text3)}
+.btn-login{width:100%;padding:0.85rem;border-radius:11px;background:linear-gradient(135deg,var(--cyan),var(--purple));border:none;color:white;font-family:var(--font);font-weight:700;font-size:0.92rem;cursor:pointer;box-shadow:0 6px 24px rgba(0,212,255,0.2);transition:all 0.2s;margin-top:0.5rem}
+.btn-login:hover{transform:translateY(-1px);box-shadow:0 10px 32px rgba(0,212,255,0.3)}
+.btn-login:disabled{opacity:0.5;cursor:not-allowed;transform:none}
+.btn-google{width:100%;padding:0.78rem;border-radius:11px;background:var(--glass2);border:1px solid var(--border);color:var(--text);font-family:var(--font);font-weight:600;font-size:0.88rem;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:0.65rem;transition:all 0.2s;margin-bottom:1rem}
+.btn-google:hover{border-color:rgba(255,255,255,0.2);background:rgba(255,255,255,0.07)}
+.divider{display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem}
+.div-line{flex:1;height:1px;background:var(--border)}
+.div-text{font-size:0.72rem;color:var(--text3);font-weight:500}
+.msg{padding:0.6rem 0.9rem;border-radius:8px;font-size:0.8rem;margin-bottom:0.75rem;display:none}
+.msg.error{background:rgba(255,71,87,0.1);border:1px solid rgba(255,71,87,0.3);color:#ff6b7a}
+.msg.success{background:rgba(6,255,165,0.08);border:1px solid rgba(6,255,165,0.25);color:var(--green)}
+.msg.info{background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.2);color:var(--cyan)}
+.msg.show{display:block}
+.step-panel{display:none}
+.step-panel.active{display:block}
+.otp-row{display:flex;gap:0.4rem;justify-content:center;margin-bottom:1rem}
+.otp-input{width:44px;height:52px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text);font-family:var(--font-m);font-size:1.25rem;font-weight:700;text-align:center;outline:none;transition:all 0.2s}
+.otp-input:focus{border-color:var(--cyan);background:rgba(0,212,255,0.04);box-shadow:0 0 0 3px rgba(0,212,255,0.08)}
+.otp-hint{text-align:center;margin-bottom:0.85rem}
+.otp-email{font-size:0.82rem;color:var(--cyan);font-weight:600}
+.otp-note{font-size:0.72rem;color:var(--text3);margin-top:0.2rem}
+.resend-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem}
+.resend-timer{font-family:var(--font-m);font-size:0.72rem;color:var(--text3)}
+.resend-btn{background:none;border:none;color:var(--cyan);font-size:0.75rem;font-weight:700;cursor:pointer;font-family:var(--font)}
+.resend-btn:disabled{color:var(--text3);cursor:not-allowed}
+.back-btn{display:block;text-align:center;margin-top:0.75rem;background:none;border:none;color:var(--text2);font-size:0.78rem;cursor:pointer;font-family:var(--font)}
+.spinner{width:15px;height:15px;border:2px solid rgba(255,255,255,0.3);border-top:2px solid white;border-radius:50%;animation:spin 0.8s linear infinite;display:inline-block;margin-right:6px;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+.terms-note{text-align:center;margin-top:1.25rem;font-size:0.72rem;color:var(--text3)}
+.terms-note a{color:var(--cyan);text-decoration:none}
+
+/* ── FOOTER ── */
+.site-footer{position:relative;z-index:1;border-top:1px solid var(--border);padding:2rem;text-align:center;font-size:0.78rem;color:var(--text3)}
+.site-footer b{color:var(--cyan)}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:var(--border);border-radius:5px}
+
+@media(max-width:768px){
+  .nav-center,.nav-status{display:none}
+  .hero-features{grid-template-columns:1fr 1fr}
+  .hero-title{font-size:2.6rem}
+}
+</style>
+</head>
+<body>
+
+<canvas id="particleCanvas"></canvas>
+<div class="orb o1"></div>
+<div class="orb o2"></div>
+<div class="orb o3"></div>
+
+<!-- NAV -->
+<nav class="nav">
+  <div class="nav-brand">
+    <div class="nav-logo-wrap">
+      <div class="nav-logo-bg"></div>
+      <div class="nav-logo-svg">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <circle cx="10" cy="10" r="3.5" fill="#00d4ff"/>
+          <circle cx="10" cy="3" r="2" fill="#7c3aed"/>
+          <circle cx="16.5" cy="13.5" r="2" fill="#06ffa5"/>
+          <circle cx="3.5" cy="13.5" r="2" fill="#ff6b9d"/>
+          <line x1="10" y1="5" x2="14.5" y2="12" stroke="#00d4ff" stroke-width="1.2"/>
+          <line x1="10" y1="5" x2="5.5" y2="12" stroke="#00d4ff" stroke-width="1.2"/>
+          <line x1="10" y1="13.5" x2="14.5" y2="12" stroke="#06ffa5" stroke-width="1.2"/>
+          <line x1="10" y1="13.5" x2="5.5" y2="12" stroke="#ff6b9d" stroke-width="1.2"/>
+        </svg>
+      </div>
+    </div>
+    <span class="nav-name">ResearchLens<span> AI</span></span>
+  </div>
+  <div class="nav-center">
+    <div class="nav-pill">Agentic AI</div>
+    <div class="nav-pill">Knowledge Graph</div>
+    <div class="nav-pill">Gap Detection</div>
+  </div>
+  <div class="nav-right">
+    <div class="nav-status">
+      <div class="status-dot"></div>
+      <span style="color:var(--green);font-size:0.78rem;font-weight:600">System Live</span>
+    </div>
+    <button class="nav-btn" onclick="openLogin()">Sign In →</button>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-badge">
+    <div class="badge-pulse"></div>
+    Autonomous Research Intelligence — Live ArXiv + Semantic Scholar
+  </div>
+
+  <h1 class="hero-title">
+    <span class="title-line1">Discover What</span>
+    <span class="title-line2">Science Hasn't</span>
+    <span class="title-line3">Explored Yet</span>
+  </h1>
+
+  <p class="hero-sub">
+    Upload your research paper. Our <b>Agentic AI</b> scans real published papers, builds an interactive knowledge graph, and identifies evidence-backed research gaps with verifiable proof — in under 60 seconds.
+  </p>
+
+  <div class="hero-counters">
+    <div class="hc-item">
+      <span class="hc-num" data-target="200">0</span>
+      <span class="hc-lbl">M+ Papers Indexed</span>
+    </div>
+    <div class="hc-item">
+      <span class="hc-num" data-target="10">0</span>
+      <span class="hc-lbl">Gaps Per Analysis</span>
+    </div>
+    <div class="hc-item">
+      <span class="hc-num" data-target="95">0</span>
+      <span class="hc-lbl">% AI Confidence</span>
+    </div>
+    <div class="hc-item">
+      <span class="hc-num">24h</span>
+      <span class="hc-lbl">Live Updates</span>
+    </div>
+  </div>
+
+  <div class="hero-ctas">
+    <button class="cta-primary" onclick="openLogin()">
+      ⚡ Start Free Analysis
+    </button>
+    <button class="cta-secondary" onclick="document.getElementById('how').scrollIntoView({behavior:'smooth'})">
+      How It Works ↓
+    </button>
+  </div>
+
+  <div class="hero-features">
+    <div class="feat-card">
+      <span class="feat-icon">🤖</span>
+      <div class="feat-name">Agentic AI Analysis</div>
+      <div class="feat-desc">LLaMA 3 70B reasons autonomously about your research, identifying 6–10 distinct evidence-backed gaps.</div>
+      <span class="feat-tag">LLaMA 3 70B</span>
+    </div>
+    <div class="feat-card">
+      <span class="feat-icon">🕸️</span>
+      <div class="feat-name">Interactive Knowledge Graph</div>
+      <div class="feat-desc">Click any node to explore connections. Ask AI questions about research relationships in real time.</div>
+      <span class="feat-tag">Force-Directed D3</span>
+    </div>
+    <div class="feat-card">
+      <span class="feat-icon">🔬</span>
+      <div class="feat-name">Evidence-Backed Proof</div>
+      <div class="feat-desc">Every gap includes a detection pipeline, supporting papers with download links, and confidence scoring.</div>
+      <span class="feat-tag">ArXiv + Semantic Scholar</span>
+    </div>
+    <div class="feat-card">
+      <span class="feat-icon">📄</span>
+      <div class="feat-name">Multi-Paper Analysis</div>
+      <div class="feat-desc">Upload up to 5 papers. Get comparative tables, auto-generated literature reviews, and gap summaries.</div>
+      <span class="feat-tag">Up to 5 PDFs</span>
+    </div>
+    <div class="feat-card">
+      <span class="feat-icon">🔔</span>
+      <div class="feat-name">Real-Time Tracking</div>
+      <div class="feat-desc">Watch topics for changes. Auto-detects new papers and new gaps daily with confidence shift alerts.</div>
+      <span class="feat-tag">24h Scheduler</span>
+    </div>
+    <div class="feat-card">
+      <span class="feat-icon">📊</span>
+      <div class="feat-name">Gap Leaderboard</div>
+      <div class="feat-desc">See the most critical gaps ranked by severity, confidence, and evidence count across all your topics.</div>
+      <span class="feat-tag">Live Rankings</span>
+    </div>
+  </div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section class="how-section" id="how">
+  <div class="section-label">Simple Process</div>
+  <h2 class="section-title">How ResearchLens Works</h2>
+  <p class="section-sub">From topic to full evidence-backed gap report in under 60 seconds.</p>
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="tl-num">01</div>
+      <div class="tl-body">
+        <div class="tl-title">Enter Topic or Upload Papers <span class="tl-badge">PDF</span></div>
+        <div class="tl-desc">Type a research topic or upload up to 5 PDF papers for multi-paper comparative analysis with literature review generation.</div>
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-num">02</div>
+      <div class="tl-body">
+        <div class="tl-title">Live Paper Fetch <span class="tl-badge">ArXiv + Semantic Scholar</span></div>
+        <div class="tl-desc">We fetch real, live published papers from two academic sources — never fake data. Only verified, peer-reviewed content.</div>
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-num">03</div>
+      <div class="tl-body">
+        <div class="tl-title">Knowledge Graph Built <span class="tl-badge">Interactive</span></div>
+        <div class="tl-desc">A force-directed graph maps all research connections. Click nodes to explore details, ask AI questions, see related gaps.</div>
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-num">04</div>
+      <div class="tl-body">
+        <div class="tl-title">AI Gap Detection <span class="tl-badge">LLaMA 3 70B</span></div>
+        <div class="tl-desc">Identifies 6–10 distinct, non-overlapping research gaps with detection pipeline, confidence scores, and supporting evidence.</div>
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-num">05</div>
+      <div class="tl-body">
+        <div class="tl-title">View Proof & Download Report <span class="tl-badge">PDF</span></div>
+        <div class="tl-desc">Each gap has a "View Proof" panel showing exactly which papers confirm the gap. Download a professional PDF report.</div>
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-num">06</div>
+      <div class="tl-body">
+        <div class="tl-title">Track Live Updates <span class="tl-badge">Daily</span></div>
+        <div class="tl-desc">Watch topics for changes. The scheduler auto-checks ArXiv every 24 hours and alerts you to new gaps and papers found.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer class="site-footer">
+  <b>ResearchLens AI</b> — Autonomous Research Gap Detection &nbsp;·&nbsp; Powered by Groq LLaMA 3 · ArXiv · Semantic Scholar &nbsp;·&nbsp; Built for researchers
+</footer>
+
+<!-- LOGIN MODAL -->
+<div class="login-overlay" id="loginOverlay" onclick="if(event.target===this)closeLogin()">
+  <div class="login-modal">
+    <div class="modal-glow"></div>
+    <button class="modal-close" onclick="closeLogin()">✕</button>
+    <div class="modal-icon">🔬</div>
+    <div class="modal-title">Welcome Back</div>
+    <div class="modal-sub">Sign in to access your research dashboard</div>
+
+    <div class="auth-tabs">
+      <button class="auth-tab active" onclick="switchModalTab('google')">🔵 Google</button>
+      <button class="auth-tab" onclick="switchModalTab('email')">✉️ Email Link</button>
+    </div>
+
+    <div class="msg" id="msgBox"></div>
+
+    <div class="step-panel active" id="panel-google">
+      <button class="btn-google" onclick="signInWithGoogle()">
+        <svg width="18" height="18" viewBox="0 0 24 24">
+          <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+          <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+          <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+          <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+        </svg>
+        Continue with Google
+      </button>
+      <div class="divider"><div class="div-line"></div><span class="div-text">or use an email link</span><div class="div-line"></div></div>
+      <p style="text-align:center;font-size:0.8rem;color:var(--text2)">Switch to <b style="color:var(--cyan)">✉️ Email Link</b> tab above</p>
+    </div>
+
+    <!--
+      Passwordless sign-in via Firebase's built-in email-link flow
+      (sendSignInLinkToEmail / signInWithEmailLink). This replaces the
+      previous custom OTP scheme, which generated and stored a random
+      password per user in a Firestore `userPasswords` collection and a
+      one-time code in an `otps` collection — both readable/writable
+      straight from client code unless Firestore rules were locked down
+      perfectly, and neither actually necessary since Firebase already
+      provides a secure, auditable passwordless flow with no secrets to
+      store or leak.
+    -->
+    <div class="step-panel" id="panel-email">
+      <div class="step-panel active" id="email-step1">
+        <div class="field-group">
+          <label class="field-label">Email Address</label>
+          <input type="email" id="emailInput" class="field-input" placeholder="you@example.com" onkeydown="if(event.key==='Enter')sendLoginLink()"/>
+        </div>
+        <button class="btn-login" id="sendLinkBtn" onclick="sendLoginLink()">Send Sign-in Link</button>
+      </div>
+      <div class="step-panel" id="email-step2">
+        <div class="otp-hint">
+          <div class="otp-email" id="emailDisplay"></div>
+          <div class="otp-note">Check inbox & spam — click the link to finish signing in on this device</div>
+        </div>
+        <div class="resend-row">
+          <span class="resend-timer" id="timerText">Resend in 60s</span>
+          <button class="resend-btn" id="resendBtn" onclick="sendLoginLink(true)" disabled>Resend Link</button>
+        </div>
+        <button class="back-btn" onclick="backToEmail()">← Use a different email</button>
+      </div>
+    </div>
+
+    <div class="terms-note">By signing in you agree to our <a href="#">Terms</a> & <a href="#">Privacy Policy</a></div>
+  </div>
+</div>
+
+<!-- Particle canvas script -->
+<script>
+(function(){
+  const canvas = document.getElementById('particleCanvas');
+  const ctx = canvas.getContext('2d');
+  let W, H, particles = [];
+
+  function resize(){ W=canvas.width=window.innerWidth; H=canvas.height=window.innerHeight; }
+  resize();
+  window.addEventListener('resize', resize);
+
+  const colors = ['rgba(0,212,255,', 'rgba(124,58,237,', 'rgba(6,255,165,', 'rgba(255,159,67,'];
+
+  for(let i=0;i<80;i++){
+    particles.push({
+      x: Math.random()*window.innerWidth,
+      y: Math.random()*window.innerHeight,
+      r: Math.random()*1.5+0.3,
+      vx: (Math.random()-0.5)*0.3,
+      vy: (Math.random()-0.5)*0.3,
+      color: colors[Math.floor(Math.random()*colors.length)],
+      opacity: Math.random()*0.5+0.1,
+      pulse: Math.random()*Math.PI*2,
+      pulseSpeed: Math.random()*0.02+0.005
+    });
+  }
+
+  function drawGrid(){
+    ctx.strokeStyle='rgba(255,255,255,0.02)';
+    ctx.lineWidth=0.5;
+    for(let x=0;x<W;x+=80){ ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke(); }
+    for(let y=0;y<H;y+=80){ ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke(); }
+  }
+
+  function animate(){
+    ctx.clearRect(0,0,W,H);
+    drawGrid();
+
+    // Draw connections between nearby particles
+    for(let i=0;i<particles.length;i++){
+      for(let j=i+1;j<particles.length;j++){
+        const dx=particles[i].x-particles[j].x, dy=particles[i].y-particles[j].y;
+        const dist=Math.sqrt(dx*dx+dy*dy);
+        if(dist<140){
+          ctx.beginPath();
+          ctx.moveTo(particles[i].x,particles[i].y);
+          ctx.lineTo(particles[j].x,particles[j].y);
+          ctx.strokeStyle='rgba(0,212,255,'+(0.06*(1-dist/140))+')';
+          ctx.lineWidth=0.5;
+          ctx.stroke();
+        }
+      }
+    }
+
+    particles.forEach(p=>{
+      p.x+=p.vx; p.y+=p.vy;
+      p.pulse+=p.pulseSpeed;
+      if(p.x<0)p.x=W; if(p.x>W)p.x=0;
+      if(p.y<0)p.y=H; if(p.y>H)p.y=0;
+      const op=p.opacity*(0.7+0.3*Math.sin(p.pulse));
+      ctx.beginPath();
+      ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+      ctx.fillStyle=p.color+op+')';
+      ctx.fill();
+    });
+
+    requestAnimationFrame(animate);
+  }
+  animate();
+
+  // Counter animation
+  document.querySelectorAll('.hc-num[data-target]').forEach(el=>{
+    const target=parseInt(el.dataset.target);
+    let current=0;
+    const step=Math.ceil(target/60);
+    const iv=setInterval(()=>{
+      current=Math.min(current+step,target);
+      el.textContent=current+(target>=100?'%':target>=50?'M+':'+');
+      if(current>=target)clearInterval(iv);
+    },20);
+  });
+})();
+
+// Modal controls
+window.openLogin  = ()=>document.getElementById('loginOverlay').classList.add('show');
+window.closeLogin = ()=>document.getElementById('loginOverlay').classList.remove('show');
+
+window.switchModalTab = (tab)=>{
+  document.querySelectorAll('.auth-tab').forEach((t,i)=>t.classList.toggle('active',(i===0&&tab==='google')||(i===1&&tab==='email')));
+  document.getElementById('panel-google').classList.toggle('active',tab==='google');
+  document.getElementById('panel-email').classList.toggle('active',tab==='email');
+  document.getElementById('msgBox').className='msg';
+};
+
+window.backToEmail=()=>{
+  document.getElementById('email-step2').classList.remove('active');
+  document.getElementById('email-step1').classList.add('active');
+  document.getElementById('msgBox').className='msg';
+};
+</script>
+
+<!--
+  Firebase Auth — passwordless email-link sign-in.
+
+  This replaces a previous custom flow that generated a 6-digit OTP,
+  wrote it to a Firestore `otps` collection, and — once "verified" —
+  generated a random password and wrote THAT to a `userPasswords`
+  collection, then signed the user in with it. Both collections were
+  reachable directly from client code and required perfect, hand-written
+  Firestore security rules to stay safe; a single misconfigured rule
+  would have exposed OTPs or every user's password. Firebase's own
+  sendSignInLinkToEmail/signInWithEmailLink flow does the same job
+  (prove the user controls the email address) with no secrets stored in
+  Firestore at all — Firebase's own auth backend handles verification.
+-->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, doc, setDoc, getDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const app  = initializeApp({apiKey:"AIzaSyA-AqkSLbkLgyyHZiQyxyKHrF7Xj5FIK-s",authDomain:"researchlens-ai-3c90b.firebaseapp.com",projectId:"researchlens-ai-3c90b",storageBucket:"researchlens-ai-3c90b.firebasestorage.app",messagingSenderId:"725178001793",appId:"1:725178001793:web:52a96bbc7422ef19f4e080"});
+const auth = getAuth(app);
+const db   = getFirestore(app);
+
+function showMsg(t,type){const el=document.getElementById('msgBox');el.textContent=t;el.className='msg'+(type?' '+type+' show':'');}
+
+// Only ever writes to the caller's own uid-keyed doc — safe under the
+// locked-down Firestore rules in firestore.rules (see repo root).
+async function saveUser(u){
+  const ref=doc(db,'users',u.uid);
+  if(!(await getDoc(ref)).exists()) await setDoc(ref,{uid:u.uid,name:u.displayName||'',email:u.email,photo:u.photoURL||'',plan:'free',createdAt:serverTimestamp(),analysisCount:0});
+  localStorage.setItem('rl_user',JSON.stringify({uid:u.uid,name:u.displayName||u.email.split('@')[0],email:u.email,photo:u.photoURL||''}));
+}
+
+window.signInWithGoogle=async()=>{
+  try{showMsg('','');const r=await signInWithPopup(auth,new GoogleAuthProvider());await saveUser(r.user);showMsg('✅ Signed in! Redirecting...','success');setTimeout(()=>window.location.href='/index.html',1200);}
+  catch(e){showMsg('❌ '+(e.message||'Failed'),'error');}
+};
+
+let gTimer=null;
+const actionCodeSettings = { url: window.location.origin + '/login', handleCodeInApp: true };
+
+window.sendLoginLink=async(isResend=false)=>{
+  const email=isResend?window.localStorage.getItem('rl_pending_email'):document.getElementById('emailInput').value.trim();
+  if(!email||!email.includes('@')){showMsg('❌ Enter a valid email','error');return;}
+  const btn=document.getElementById('sendLinkBtn');
+  if(!isResend){btn.innerHTML='<span class="spinner"></span>Sending...';btn.disabled=true;}
+  showMsg('📨 Sending sign-in link...','info');
+  try{
+    await sendSignInLinkToEmail(auth, email, actionCodeSettings);
+    // Firebase's own email-link verification needs the same email back
+    // on this device when the link is opened — this is a convenience
+    // cache, not a secret, and carries no sign-in power on its own.
+    window.localStorage.setItem('rl_pending_email', email);
+    document.getElementById('emailDisplay').textContent=email;
+    document.getElementById('email-step1').classList.remove('active');
+    document.getElementById('email-step2').classList.add('active');
+    let s=60;const te=document.getElementById('timerText'),rb=document.getElementById('resendBtn');
+    rb.disabled=true;clearInterval(gTimer);
+    gTimer=setInterval(()=>{s--;te.textContent='Resend in '+s+'s';if(s<=0){clearInterval(gTimer);te.textContent='';rb.disabled=false;}},1000);
+    showMsg('✅ Link sent! Check your inbox.','success');
+  }catch(e){showMsg('❌ '+(e.message||'Failed to send link.'),'error');}
+  if(!isResend){btn.innerHTML='Send Sign-in Link';btn.disabled=false;}
+};
+
+// If this page was loaded BY clicking the emailed link, complete sign-in.
+(async function completeEmailLinkSignInIfNeeded(){
+  if(!isSignInWithEmailLink(auth, window.location.href)) return;
+  let email = window.localStorage.getItem('rl_pending_email');
+  if(!email){
+    email = window.prompt('Confirm your email to finish signing in:');
+  }
+  if(!email) return;
+  try{
+    const cred = await signInWithEmailLink(auth, email, window.location.href);
+    window.localStorage.removeItem('rl_pending_email');
+    await saveUser(cred.user);
+    showMsg('✅ Verified! Redirecting...','success');
+    setTimeout(()=>window.location.href='/index.html',1200);
+  }catch(e){showMsg('❌ '+(e.message||'That link is invalid or expired.'),'error');}
+})();
+</script>
+</body>
+</html>

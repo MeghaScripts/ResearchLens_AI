@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Publication Explorer — ResearchLens AI</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/static/css/style.css"/>
+<style>
+  .pe-wrap{max-width:1200px;margin:0 auto;padding:2rem}
+  .pe-header{margin-bottom:1.5rem}
+  .pe-header h1{font-family:var(--font-display);font-size:1.9rem}
+  .pe-header p{color:var(--text2);font-size:0.9rem;margin-top:0.4rem}
+  .pe-grid{display:grid;grid-template-columns:280px 1fr;gap:1.5rem;align-items:start}
+  @media (max-width:900px){.pe-grid{grid-template-columns:1fr}}
+  .pe-card{background:var(--glass);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem}
+  .pe-search{width:100%;padding:0.65rem 0.9rem;border-radius:10px;background:rgba(255,255,255,0.05);border:1px solid var(--border);color:var(--text);font-family:var(--font-main);font-size:0.85rem;margin-bottom:0.9rem;outline:none}
+  .pe-search:focus{border-color:var(--cyan)}
+  .pe-cat{font-size:0.68rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--text3);margin:0.9rem 0 0.35rem;font-weight:600}
+  .pe-domain-item{display:flex;align-items:center;justify-content:space-between;gap:0.5rem;width:100%;text-align:left;padding:0.55rem 0.9rem;border-radius:999px;background:rgba(255,255,255,0.03);border:1px solid var(--border);color:var(--text);font-family:var(--font-main);font-size:0.85rem;font-weight:600;cursor:pointer;transition:background 0.15s,color 0.15s,border-color 0.15s;margin-bottom:0.4rem}
+  .pe-domain-item:hover{background:var(--glass2);color:var(--text);border-color:var(--border2)}
+  .pe-domain-item.active{background:rgba(0,212,255,0.12);color:var(--cyan);border-color:rgba(0,212,255,0.35)}
+  .pe-domain-item .pe-chevron{opacity:0.45;font-size:0.85rem;flex-shrink:0}
+  .pe-domain-item.active .pe-chevron{opacity:0.8}
+  /* Sub-domains: no pill fill/border of their own — instead a thin
+     tree-line on the left ties them visually to their parent domain
+     above, with smaller, dimmer text so they read as nested rather
+     than as another top-level domain. */
+  .pe-domain-item.sub{margin-left:1.15rem;width:calc(100% - 1.15rem);padding:0.4rem 0.7rem;border-radius:0 999px 999px 0;background:transparent;border:none;border-left:2px solid var(--border);font-size:0.78rem;font-weight:400;color:var(--text3)}
+  .pe-domain-item.sub:hover{background:var(--glass2);color:var(--text2);border-left-color:var(--border2)}
+  .pe-domain-item.sub.active{background:rgba(0,212,255,0.08);color:var(--cyan);border-left-color:var(--cyan);font-weight:600}
+  .pe-list{max-height:70vh;overflow-y:auto;padding-right:0.4rem}
+  .pe-section-title{font-family:var(--font-display);font-size:1.2rem;margin:0 0 0.25rem}
+  .pe-breadcrumb{font-size:0.78rem;color:var(--text3);margin-bottom:1rem}
+  .pe-breadcrumb b{color:var(--text2)}
+  .pe-subrow{display:flex;flex-wrap:wrap;gap:0.5rem;margin-bottom:1.25rem}
+  .pe-chip{font-size:0.75rem;padding:0.3rem 0.7rem;border-radius:20px;background:var(--glass2);border:1px solid var(--border);color:var(--text2)}
+  .pe-tabs{display:flex;gap:0.4rem;margin-bottom:1rem;flex-wrap:wrap}
+  .pe-tab{padding:0.4rem 0.85rem;border-radius:8px;background:var(--glass2);border:1px solid var(--border);color:var(--text2);font-size:0.8rem;cursor:pointer}
+  .pe-tab.active{border-color:var(--border2);color:var(--cyan)}
+  .pe-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:0.9rem}
+  .pe-vcard{background:var(--glass2);border:1px solid var(--border);border-radius:10px;padding:1rem}
+  .pe-vcard h4{font-size:0.92rem;margin-bottom:0.4rem;line-height:1.3}
+  .pe-vcard .pe-meta{font-size:0.76rem;color:var(--text2);margin-bottom:0.3rem}
+  .pe-badge{display:inline-block;font-size:0.68rem;padding:0.15rem 0.5rem;border-radius:6px;font-weight:600;margin-right:0.3rem;margin-top:0.4rem}
+  .pe-badge.unverified{background:rgba(255,159,67,0.12);color:var(--orange);border:1px solid rgba(255,159,67,0.3)}
+  .pe-badge.type{background:rgba(124,58,237,0.12);color:var(--purple);border:1px solid rgba(124,58,237,0.3)}
+  .pe-empty{color:var(--text3);font-size:0.85rem;padding:1.5rem 0}
+  .pe-classify{margin-bottom:1.75rem}
+  .pe-classify-row{display:flex;gap:0.6rem}
+  .pe-classify-row input{flex:1}
+  .pe-classify-row button{padding:0.65rem 1.2rem;border-radius:10px;background:linear-gradient(135deg,var(--cyan),var(--purple));border:none;color:#050812;font-weight:700;font-size:0.85rem;cursor:pointer}
+  .pe-classify-result{margin-top:1rem;font-size:0.85rem}
+  .pe-conf-note{font-size:0.75rem;color:var(--text3);margin-top:0.5rem}
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+<div class="orb orb1"></div><div class="orb orb2"></div><div class="orb orb3"></div>
+
+<nav class="navbar">
+  <div class="nav-brand">
+    <div class="brand-icon">
+      <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+        <circle cx="14" cy="14" r="5" fill="#00d4ff"/>
+        <circle cx="14" cy="4" r="3" fill="#7c3aed"/>
+        <circle cx="23" cy="19" r="3" fill="#06ffa5"/>
+        <circle cx="5" cy="19" r="3" fill="#ff6b6b"/>
+      </svg>
+    </div>
+    <span class="brand-name">ResearchLens<span class="brand-ai"> AI</span></span>
+  </div>
+  <div class="nav-tags"><span class="tag">Publication Explorer</span></div>
+  <div class="nav-right">
+    <button class="logout-btn" onclick="window.location.href='/index.html'">← Back to Analysis</button>
+  </div>
+</nav>
+
+<div class="pe-wrap">
+  <div class="pe-header">
+    <h1>Research Publication Explorer</h1>
+    <p>Domain → Sub-domain → Society → Publisher → Journal / Conference. Static identity facts only — journal/conference metrics (quartile, impact factor, indexing) are shown as <b>Not verified</b> unless a live metadata provider is connected, never fabricated.</p>
+  </div>
+
+  <div class="pe-card pe-classify">
+    <div class="pe-section-title" style="font-size:1rem">Classify a research idea</div>
+    <div class="pe-classify-row">
+      <input class="pe-search" id="classifyInput" style="margin-bottom:0" placeholder="e.g. AI based smart grid optimization, Kannada NLP..."/>
+      <button onclick="runClassify()">Analyze</button>
+    </div>
+    <div id="classifyResult" class="pe-classify-result"></div>
+  </div>
+
+  <div class="pe-grid">
+    <div class="pe-card">
+      <input class="pe-search" id="domainSearch" placeholder="Search domains..." oninput="renderDomainList()"/>
+      <div class="pe-list" id="domainList"></div>
+    </div>
+
+    <div class="pe-card" id="detailPane">
+      <div class="pe-empty">Select a domain on the left, or analyze a research idea above.</div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import '/static/js/firebase-auth.js';
+  await window.rlAuth.requireAuth();
+</script>
+<script>
+let ALL_DOMAINS = [];
+let CATEGORIES = [];
+let SELECTED_DOMAIN = null;
+
+async function loadDomains() {
+  const res = await fetch('/api/domains');
+  const data = await res.json();
+  ALL_DOMAINS = data.domains;
+  CATEGORIES = data.categories;
+  renderDomainList();
+}
+
+function renderDomainList() {
+  const q = (document.getElementById('domainSearch').value || '').toLowerCase();
+  const list = document.getElementById('domainList');
+  const filtered = ALL_DOMAINS.filter(d => d.name.toLowerCase().includes(q));
+  let html = '';
+  for (const cat of CATEGORIES) {
+    const items = filtered.filter(d => d.category === cat);
+    if (!items.length) continue;
+    html += `<div class="pe-cat">${cat}</div>`;
+    for (const d of items) {
+      const active = SELECTED_DOMAIN && SELECTED_DOMAIN.id === d.id ? 'active' : '';
+      const subClass = d.parent ? 'sub' : '';
+      html += `<button class="pe-domain-item ${active} ${subClass}" onclick="selectDomain(${d.id})"><span>${d.name}</span><span class="pe-chevron">›</span></button>`;
+    }
+  }
+  list.innerHTML = html || '<div class="pe-empty">No domains match.</div>';
+}
+
+async function selectDomain(id) {
+  const detail = document.getElementById('detailPane');
+  detail.innerHTML = '<div class="pe-empty">Loading…</div>';
+  const [d, societies, publishers, journals, conferences] = await Promise.all([
+    fetch(`/api/domains/${id}`).then(r => r.json()),
+    fetch(`/api/domains/${id}/societies`).then(r => r.json()),
+    fetch(`/api/domains/${id}/publishers`).then(r => r.json()),
+    fetch(`/api/domains/${id}/journals`).then(r => r.json()),
+    fetch(`/api/domains/${id}/conferences`).then(r => r.json()),
+  ]);
+  SELECTED_DOMAIN = d;
+  renderDomainList();
+
+  const venueCard = (v) => `
+    <div class="pe-vcard">
+      <h4>${v.name}${v.acronym ? ` (${v.acronym})` : ''}</h4>
+      <div class="pe-meta">${v.publisher ? 'Publisher: ' + v.publisher : ''}${v.society ? ' · Society: ' + v.society : ''}</div>
+      <span class="pe-badge type">${v.venue_type}</span>
+      <span class="pe-badge unverified">Quartile: ${v.quartile}</span>
+      <span class="pe-badge unverified">Indexing: ${v.indexing}</span>
+    </div>`;
+
+  detail.innerHTML = `
+    <div class="pe-breadcrumb">${d.category}${d.parent ? ` › <b>${d.parent}</b>` : ''} › <b>${d.name}</b></div>
+    <div class="pe-section-title">${d.name}</div>
+    ${d.subdomains && d.subdomains.length ? `<div class="pe-subrow">${d.subdomains.map(s => `<span class="pe-chip" style="cursor:pointer" onclick="selectDomain(${s.id})">${s.name}</span>`).join('')}</div>` : ''}
+
+    <div class="pe-tabs">
+      <div class="pe-tab active" onclick="peSwitchTab(this,'soc')">Societies (${societies.societies.length})</div>
+      <div class="pe-tab" onclick="peSwitchTab(this,'pub')">Publishers (${publishers.publishers.length})</div>
+      <div class="pe-tab" onclick="peSwitchTab(this,'jou')">Journals (${journals.journals.length})</div>
+      <div class="pe-tab" onclick="peSwitchTab(this,'con')">Conferences (${conferences.conferences.length})</div>
+    </div>
+
+    <div id="pe-panel-soc" class="pe-panel">
+      <div class="pe-cards">${societies.societies.map(s => `<div class="pe-vcard"><h4>${s.name}</h4><div class="pe-meta">${s.description || ''}</div>${s.website ? `<a href="${s.website}" target="_blank" style="font-size:0.75rem;color:var(--cyan)">${s.website}</a>` : ''}</div>`).join('') || '<div class="pe-empty">No societies mapped to this domain yet.</div>'}</div>
+    </div>
+    <div id="pe-panel-pub" class="pe-panel" style="display:none">
+      <div class="pe-cards">${publishers.publishers.map(p => `<div class="pe-vcard"><h4>${p.name}</h4>${p.website ? `<a href="${p.website}" target="_blank" style="font-size:0.75rem;color:var(--cyan)">${p.website}</a>` : ''}</div>`).join('') || '<div class="pe-empty">No publishers mapped to this domain yet.</div>'}</div>
+    </div>
+    <div id="pe-panel-jou" class="pe-panel" style="display:none">
+      <div class="pe-cards">${journals.journals.map(venueCard).join('') || '<div class="pe-empty">No seeded journals for this specific domain yet — try a broader parent domain.</div>'}</div>
+    </div>
+    <div id="pe-panel-con" class="pe-panel" style="display:none">
+      <div class="pe-cards">${conferences.conferences.map(venueCard).join('') || '<div class="pe-empty">No seeded conferences for this specific domain yet — try a broader parent domain.</div>'}</div>
+    </div>
+  `;
+}
+
+function peSwitchTab(el, key) {
+  document.querySelectorAll('.pe-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.querySelectorAll('.pe-panel').forEach(p => p.style.display = 'none');
+  document.getElementById('pe-panel-' + key).style.display = '';
+}
+
+async function runClassify() {
+  const q = document.getElementById('classifyInput').value.trim();
+  const out = document.getElementById('classifyResult');
+  if (!q) return;
+  out.innerHTML = '<div class="pe-empty">Analyzing…</div>';
+  try {
+    const res = await fetch('/api/classify-research-topic', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ query: q })
+    });
+    const data = await res.json();
+    if (!res.ok) { out.innerHTML = `<div class="pe-empty">${data.error || 'Classification failed.'}</div>`; return; }
+    if (!data.primary_domain) { out.innerHTML = `<div class="pe-empty">${data.message || 'No confident domain match.'}</div>`; return; }
+    const p = data.primary_domain;
+    const sec = data.secondary_domains || [];
+    out.innerHTML = `
+      <div><b>Primary domain:</b> <span class="pe-chip" style="cursor:pointer" onclick="selectDomain(${p.domain_id})">${p.name}</span> <span class="pe-meta" style="display:inline">(confidence ${(p.confidence*100).toFixed(0)}%)</span></div>
+      ${sec.length ? `<div style="margin-top:0.5rem"><b>Secondary domains:</b> ${sec.map(s => `<span class="pe-chip" style="cursor:pointer" onclick="selectDomain(${s.domain_id})">${s.name} (${(s.confidence*100).toFixed(0)}%)</span>`).join(' ')}</div>` : ''}
+      ${data.low_confidence ? `<div class="pe-conf-note">⚠️ ${data.message || 'Multiple possible domains — confidence is not high. Consider selecting the intended domain manually.'}</div>` : ''}
+    `;
+  } catch (e) {
+    out.innerHTML = '<div class="pe-empty">Could not reach the classifier.</div>';
+  }
+}
+
+window.selectDomain = selectDomain;
+window.renderDomainList = renderDomainList;
+window.peSwitchTab = peSwitchTab;
+window.runClassify = runClassify;
+
+loadDomains();
+</script>
+</body>
+</html>

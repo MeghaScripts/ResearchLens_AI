@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>ResearchLens AI — Admin Panel</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#020510;--bg2:#060d1f;--bg3:#0a1528;
+  --cyan:#00d4ff;--purple:#7c3aed;--green:#06ffa5;
+  --orange:#ff9f43;--red:#ff4757;
+  --text:#f0f4ff;--text2:#8899bb;--text3:#445577;
+  --glass:rgba(255,255,255,0.03);--glass2:rgba(255,255,255,0.06);
+  --border:rgba(255,255,255,0.08);
+  --font:'Segoe UI',system-ui,sans-serif;
+}
+body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh}
+a{color:var(--cyan)}
+.wrap{max-width:1200px;margin:0 auto;padding:2rem 1.5rem 4rem}
+
+/* login gate */
+#loginGate{max-width:380px;margin:8rem auto;padding:2rem;background:var(--glass);border:1px solid var(--border);border-radius:16px}
+#loginGate h1{font-size:1.3rem;margin-bottom:1.5rem}
+#loginGate input{width:100%;padding:0.7rem 0.9rem;margin-bottom:0.8rem;border-radius:8px;border:1px solid var(--border);background:var(--bg2);color:var(--text);font-size:0.9rem}
+#loginGate button{width:100%;padding:0.75rem;border-radius:8px;border:none;background:linear-gradient(135deg,var(--cyan),var(--purple));color:#fff;font-weight:700;cursor:pointer}
+#loginErr{color:var(--red);font-size:0.82rem;margin-top:0.5rem;min-height:1.2em}
+
+header.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:2rem;flex-wrap:wrap;gap:1rem}
+header.top h1{font-size:1.5rem}
+header.top h1 span{color:var(--cyan)}
+#logoutBtn{padding:0.5rem 1rem;border-radius:8px;border:1px solid var(--border);background:var(--glass2);color:var(--text);cursor:pointer}
+
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin-bottom:2rem}
+.kpi{background:var(--glass);border:1px solid var(--border);border-radius:12px;padding:1rem 1.2rem}
+.kpi .num{font-size:1.6rem;font-weight:800;color:var(--cyan)}
+.kpi .lbl{font-size:0.75rem;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-top:0.2rem}
+
+.tabs{display:flex;gap:0.4rem;flex-wrap:wrap;margin-bottom:1.5rem;border-bottom:1px solid var(--border);padding-bottom:0.8rem}
+.tab{padding:0.5rem 1rem;border-radius:20px;border:1px solid var(--border);background:var(--glass);color:var(--text2);cursor:pointer;font-size:0.85rem;font-weight:600}
+.tab.active{background:linear-gradient(135deg,var(--cyan),var(--purple));color:#fff;border-color:transparent}
+
+.panel{display:none}
+.panel.active{display:block}
+
+table{width:100%;border-collapse:collapse;font-size:0.85rem;background:var(--glass);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+th,td{padding:0.6rem 0.8rem;text-align:left;border-bottom:1px solid var(--border)}
+th{color:var(--text2);text-transform:uppercase;font-size:0.7rem;letter-spacing:0.05em;background:var(--bg2)}
+tr:hover td{background:rgba(255,255,255,0.02)}
+.badge{padding:0.15rem 0.55rem;border-radius:12px;font-size:0.72rem;font-weight:700}
+.badge.free{background:rgba(136,153,187,0.15);color:var(--text2)}
+.badge.premium{background:rgba(255,215,0,0.15);color:#ffd700}
+.badge.active{background:rgba(6,255,165,0.15);color:var(--green)}
+.badge.suspended{background:rgba(255,71,87,0.15);color:var(--red)}
+select,button.small{font-size:0.78rem;padding:0.3rem 0.5rem;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text);cursor:pointer}
+.muted{color:var(--text3);font-size:0.8rem}
+.loading{color:var(--text2);padding:2rem;text-align:center}
+</style>
+</head>
+<body>
+
+<div id="loginGate">
+  <h1>🔒 Admin Sign In</h1>
+  <input type="email" id="adminEmail" placeholder="admin email"/>
+  <input type="password" id="adminPass" placeholder="password"/>
+  <button onclick="adminLogin()">Sign In</button>
+  <div id="loginErr"></div>
+</div>
+
+<div class="wrap" id="dashboard" style="display:none">
+  <header class="top">
+    <h1>ResearchLens <span>Admin</span></h1>
+    <button id="logoutBtn" onclick="adminLogout()">Sign out</button>
+  </header>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="tabs">
+    <button class="tab active" data-t="users" onclick="showTab('users')">Users</button>
+    <button class="tab" data-t="papers" onclick="showTab('papers')">Papers</button>
+    <button class="tab" data-t="apikeys" onclick="showTab('apikeys')">API Keys</button>
+    <button class="tab" data-t="storage" onclick="showTab('storage')">Storage</button>
+    <button class="tab" data-t="analytics" onclick="showTab('analytics')">Usage Analytics</button>
+    <button class="tab" data-t="feedback" onclick="showTab('feedback')">Feedback</button>
+    <button class="tab" data-t="errors" onclick="showTab('errors')">Error Logs</button>
+  </div>
+
+  <div class="panel active" id="panel-users"><div class="loading">Loading…</div></div>
+  <div class="panel" id="panel-papers"><div class="loading">Loading…</div></div>
+  <div class="panel" id="panel-apikeys"><div class="loading">Loading…</div></div>
+  <div class="panel" id="panel-storage"><div class="loading">Loading…</div></div>
+  <div class="panel" id="panel-analytics"><div class="loading">Loading…</div></div>
+  <div class="panel" id="panel-feedback"><div class="loading">Loading…</div></div>
+  <div class="panel" id="panel-errors"><div class="loading">Loading…</div></div>
+</div>
+
+<script>
+const TOKEN_KEY = 'rl_admin_token';
+let ADMIN_TOKEN = sessionStorage.getItem(TOKEN_KEY) || '';
+
+function esc(s){ return (s===null||s===undefined) ? '' : String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function api(path, opts={}){
+  opts.headers = Object.assign({'Content-Type':'application/json','Authorization':'Bearer '+ADMIN_TOKEN}, opts.headers||{});
+  const r = await fetch('/api/admin'+path, opts);
+  if(r.status===401 || r.status===403){ adminLogout(); throw new Error('Not authorized'); }
+  const d = await r.json();
+  if(!r.ok) throw new Error(d.error||'Request failed');
+  return d;
+}
+
+async function adminLogin(){
+  const email = document.getElementById('adminEmail').value.trim();
+  const password = document.getElementById('adminPass').value;
+  const errEl = document.getElementById('loginErr');
+  errEl.textContent = '';
+  try{
+    const r = await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error||'Login failed');
+    ADMIN_TOKEN = d.token;
+    sessionStorage.setItem(TOKEN_KEY, ADMIN_TOKEN);
+    boot();
+  }catch(e){ errEl.textContent = '❌ '+e.message; }
+}
+
+function adminLogout(){
+  sessionStorage.removeItem(TOKEN_KEY);
+  ADMIN_TOKEN='';
+  document.getElementById('dashboard').style.display='none';
+  document.getElementById('loginGate').style.display='block';
+}
+
+function showTab(t){
+  document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active', el.dataset.t===t));
+  document.querySelectorAll('.panel').forEach(el=>el.classList.toggle('active', el.id==='panel-'+t));
+  loaders[t]();
+}
+
+const loaders = {
+  users: loadUsers, papers: loadPapers, apikeys: loadApiKeys,
+  storage: loadStorage, analytics: loadAnalytics, feedback: loadFeedback, errors: loadErrors
+};
+
+async function loadKpis(){
+  try{
+    const d = await api('/analytics');
+    document.getElementById('kpis').innerHTML = `
+      <div class="kpi"><div class="num">${d.total_users}</div><div class="lbl">Total Users</div></div>
+      <div class="kpi"><div class="num">${d.premium_users}</div><div class="lbl">Premium Users</div></div>
+      <div class="kpi"><div class="num">${d.total_analyses}</div><div class="lbl">Papers Analyzed</div></div>
+      <div class="kpi"><div class="num">${d.total_api_calls}</div><div class="lbl">API Calls</div></div>`;
+  }catch(e){}
+}
+
+async function loadUsers(){
+  const el = document.getElementById('panel-users');
+  el.innerHTML = '<div class="loading">Loading…</div>';
+  const d = await api('/users');
+  let rows = d.users.map(u=>`
+    <tr>
+      <td>${u.id}</td>
+      <td>${esc(u.name)}</td>
+      <td>${esc(u.email)}</td>
+      <td><span class="badge ${u.plan}">${u.plan}</span></td>
+      <td><span class="badge ${u.status}">${u.status}</span></td>
+      <td>${u.is_admin ? '✅' : ''}</td>
+      <td class="muted">${esc(u.created_at||'').slice(0,10)}</td>
+      <td>
+        <select onchange="patchUser(${u.id},'plan',this.value)">
+          <option value="free" ${u.plan==='free'?'selected':''}>free</option>
+          <option value="premium" ${u.plan==='premium'?'selected':''}>premium</option>
+        </select>
+        <select onchange="patchUser(${u.id},'status',this.value)">
+          <option value="active" ${u.status==='active'?'selected':''}>active</option>
+          <option value="suspended" ${u.status==='suspended'?'selected':''}>suspended</option>
+        </select>
+        <button class="small" onclick="deleteUser(${u.id})">Delete</button>
+      </td>
+    </tr>`).join('');
+  el.innerHTML = `<table><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Plan</th><th>Status</th><th>Admin</th><th>Joined</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan=8 class=muted>No users yet</td></tr>'}</tbody></table>`;
+}
+
+async function patchUser(id, field, value){
+  await api('/users/'+id, {method:'PATCH', body: JSON.stringify({[field]: value})});
+  loadUsers(); loadKpis();
+}
+async function deleteUser(id){
+  if(!confirm('Delete this user? This cannot be undone.')) return;
+  await api('/users/'+id, {method:'DELETE'});
+  loadUsers(); loadKpis();
+}
+
+async function loadPapers(){
+  const el = document.getElementById('panel-papers');
+  el.innerHTML = '<div class="loading">Loading…</div>';
+  const d = await api('/papers');
+  let rows = d.papers.map(p=>`<tr><td>${p.id}</td><td>${esc(p.topic)}</td><td>${p.gaps_count}</td><td>${p.user_id ?? '<span class=muted>anonymous</span>'}</td><td class="muted">${esc(p.created_at||'').slice(0,16)}</td></tr>`).join('');
+  el.innerHTML = `<table><thead><tr><th>ID</th><th>Topic</th><th>Gaps Found</th><th>User</th><th>Created</th></tr></thead><tbody>${rows||'<tr><td colspan=5 class=muted>No analyses yet</td></tr>'}</tbody></table>`;
+}
+
+async function loadApiKeys(){
+  const el = document.getElementById('panel-apikeys');
+  el.innerHTML = '<div class="loading">Loading…</div>';
+  const d = await api('/api-keys');
+  let rows = d.api_keys.map(k=>`<tr><td>${k.user_id}</td><td>${esc(k.name)}</td><td>${esc(k.email)}</td><td><code>${esc(k.masked_key)}</code></td></tr>`).join('');
+  el.innerHTML = `<p class="muted" style="margin-bottom:0.8rem">Users may optionally save their own Groq API key to their profile so they don't have to re-enter it each time. Keys are masked here.</p><table><thead><tr><th>User ID</th><th>Name</th><th>Email</th><th>Key</th></tr></thead><tbody>${rows||'<tr><td colspan=4 class=muted>No saved keys</td></tr>'}</tbody></table>`;
+}
+
+async function loadStorage(){
+  const el = document.getElementById('panel-storage');
+  el.innerHTML = '<div class="loading">Loading…</div>';
+  const d = await api('/storage');
+  el.innerHTML = `<div class="kpis">
+    <div class="kpi"><div class="num">${d.uploads.mb} MB</div><div class="lbl">Uploads (${d.uploads.files} files)</div></div>
+    <div class="kpi"><div class="num">${d.reports.mb} MB</div><div class="lbl">Reports (${d.reports.files} files)</div></div>
+    <div class="kpi"><div class="num">${d.database_mb} MB</div><div class="lbl">Database</div></div>
+  </div>`;
+}
+
+async function loadAnalytics(){
+  const el = document.getElementById('panel-analytics');
+  el.innerHTML = '<div class="loading">Loading…</div>';
+  const d = await api('/analytics');
+  let byEp = d.calls_by_endpoint.map(r=>`<tr><td>${esc(r.endpoint)}</td><td>${r.c}</td></tr>`).join('');
+  let byDay = d.calls_last_14_days.map(r=>`<tr><td>${esc(r.d)}</td><td>${r.c}</td></tr>`).join('');
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem">
+      <div><h3 style="margin-bottom:0.6rem;font-size:0.95rem">Calls by Endpoint</h3>
+        <table><thead><tr><th>Endpoint</th><th>Calls</th></tr></thead><tbody>${byEp||'<tr><td colspan=2 class=muted>No data yet</td></tr>'}</tbody></table></div>
+      <div><h3 style="margin-bottom:0.6rem;font-size:0.95rem">Calls — Last 14 Days</h3>
+        <table><thead><tr><th>Date</th><th>Calls</th></tr></thead><tbody>${byDay||'<tr><td colspan=2 class=muted>No data yet</td></tr>'}</tbody></table></div>
+    </div>`;
+}
+
+async function loadFeedback(){
+  const el = document.getElementById('panel-feedback');
+  el.innerHTML = '<div class="loading">Loading…</div>';
+  const d = await api('/feedback');
+  let rows = d.feedback.map(f=>`<tr><td>${esc(f.name)}</td><td>${esc(f.email)}</td><td>${f.rating??'-'}</td><td>${esc(f.message)}</td><td class="muted">${esc(f.created_at||'').slice(0,16)}</td></tr>`).join('');
+  el.innerHTML = `<table><thead><tr><th>Name</th><th>Email</th><th>Rating</th><th>Message</th><th>When</th></tr></thead><tbody>${rows||'<tr><td colspan=5 class=muted>No feedback yet</td></tr>'}</tbody></table>`;
+}
+
+async function loadErrors(){
+  const el = document.getElementById('panel-errors');
+  el.innerHTML = '<div class="loading">Loading…</div>';
+  const d = await api('/error-logs');
+  let rows = d.error_logs.map(e=>`<tr><td>${esc(e.endpoint)}</td><td>${esc(e.error_message)}</td><td>${e.user_id??'-'}</td><td class="muted">${esc(e.created_at||'').slice(0,16)}</td></tr>`).join('');
+  el.innerHTML = `<table><thead><tr><th>Endpoint</th><th>Error</th><th>User</th><th>When</th></tr></thead><tbody>${rows||'<tr><td colspan=4 class=muted>No errors logged 🎉</td></tr>'}</tbody></table>`;
+}
+
+async function boot(){
+  document.getElementById('loginGate').style.display='none';
+  document.getElementById('dashboard').style.display='block';
+  await loadKpis();
+  await loadUsers();
+}
+
+if(ADMIN_TOKEN){ boot().catch(()=>adminLogout()); }
+</script>
+</body>
+</html>
