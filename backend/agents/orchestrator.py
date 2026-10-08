@@ -33,6 +33,18 @@ class Orchestrator:
 
     def _record(self, context, result):
         context.setdefault('_trace', []).append(result)
+        # Live progress for /api/analyze/start: push each finished agent (and
+        # the papers once search_agent has found them) into the job store.
+        job_id = context.get('_job_id')
+        if job_id:
+            try:
+                import jobs
+                jobs.add_step(job_id, result.agent,
+                              result.explanation or result.error or '', result.success)
+                if result.agent == 'search_agent' and result.success:
+                    jobs.set_papers(job_id, context.get('papers') or [])
+            except Exception as e:
+                print(f"job progress update failed: {e}")
         if self.event_bus:
             self.event_bus.publish(f"agent.{result.agent}.completed",
                                     {'success': result.success, 'agent': result.agent})

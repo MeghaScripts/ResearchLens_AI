@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Paper Verification — ResearchLens AI</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/static/css/style.css"/>
+<style>
+  .vf-wrap{max-width:1280px;margin:0 auto;padding:2rem}
+  .vf-header h1{font-family:var(--font-display);font-size:1.9rem}
+  .vf-header p{color:var(--text2);font-size:0.9rem;margin-top:0.4rem;max-width:74ch}
+  .vf-grid{display:grid;grid-template-columns:300px 1fr;gap:1.5rem;align-items:start;margin-top:1.5rem}
+  @media (max-width:980px){.vf-grid{grid-template-columns:1fr}}
+  .vf-card{background:var(--glass);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;margin-bottom:1.25rem}
+  .vf-card h3{font-family:var(--font-display);font-size:1.05rem;margin:0 0 0.75rem}
+  .vf-run{width:100%;text-align:left;padding:0.7rem 0.85rem;border-radius:10px;background:rgba(255,255,255,0.03);
+          border:1px solid var(--border);color:var(--text);font-family:var(--font-main);font-size:0.82rem;
+          cursor:pointer;margin-bottom:0.45rem;transition:background .15s,border-color .15s}
+  .vf-run:hover{background:var(--glass2);border-color:var(--border2)}
+  .vf-run.active{background:rgba(0,212,255,0.10);border-color:rgba(0,212,255,0.35);color:var(--cyan)}
+  .vf-run .vf-run-meta{display:block;font-size:0.7rem;color:var(--text3);margin-top:0.25rem}
+  .vf-run.active .vf-run-meta{color:var(--cyan)}
+  .vf-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:0.75rem}
+  .vf-stat{background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;padding:0.7rem 0.85rem}
+  .vf-stat .k{font-size:0.66rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--text3)}
+  .vf-stat .v{font-family:var(--font-mono,var(--font-main));font-size:1.25rem;font-weight:600;margin-top:0.2rem}
+  .vf-stat .s{font-size:0.68rem;color:var(--text3);margin-top:0.15rem}
+  .vf-chips{display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.6rem}
+  .vf-chip{font-size:0.7rem;padding:0.25rem 0.6rem;border-radius:20px;background:var(--glass2);
+           border:1px solid var(--border);color:var(--text2);white-space:nowrap}
+  .vf-badge{font-size:0.66rem;font-weight:700;letter-spacing:0.04em;padding:0.22rem 0.55rem;border-radius:6px;
+            text-transform:uppercase;white-space:nowrap}
+  .b-HIGHLY_VERIFIED{background:rgba(34,197,94,0.16);color:#4ade80;border:1px solid rgba(34,197,94,0.35)}
+  .b-VERIFIED{background:rgba(34,197,94,0.10);color:#86efac;border:1px solid rgba(34,197,94,0.25)}
+  .b-PARTIALLY_VERIFIED{background:rgba(234,179,8,0.13);color:#fde047;border:1px solid rgba(234,179,8,0.3)}
+  .b-UNVERIFIED{background:rgba(148,163,184,0.13);color:#cbd5e1;border:1px solid rgba(148,163,184,0.3)}
+  .b-OFF_TOPIC{background:rgba(249,115,22,0.13);color:#fdba74;border:1px solid rgba(249,115,22,0.3)}
+  .b-REJECTED{background:rgba(239,68,68,0.14);color:#fca5a5;border:1px solid rgba(239,68,68,0.35)}
+  .b-RETRACTED{background:rgba(239,68,68,0.22);color:#fecaca;border:1px solid rgba(239,68,68,0.5)}
+  .vf-filters{display:flex;flex-wrap:wrap;gap:0.5rem;margin-bottom:1rem}
+  .vf-filters select,.vf-filters input{padding:0.45rem 0.7rem;border-radius:8px;background:rgba(255,255,255,0.05);
+        border:1px solid var(--border);color:var(--text);font-family:var(--font-main);font-size:0.8rem;outline:none}
+  .vf-filters select:focus,.vf-filters input:focus{border-color:var(--cyan)}
+  .vf-paper{border:1px solid var(--border);border-radius:12px;padding:0.9rem 1rem;margin-bottom:0.65rem;
+            background:rgba(255,255,255,0.02)}
+  .vf-paper.failed{border-color:rgba(239,68,68,0.25);background:rgba(239,68,68,0.03)}
+  .vf-ptop{display:flex;justify-content:space-between;gap:1rem;align-items:flex-start}
+  .vf-ptitle{font-size:0.92rem;font-weight:600;line-height:1.35;cursor:pointer}
+  .vf-ptitle:hover{color:var(--cyan)}
+  .vf-pmeta{font-size:0.72rem;color:var(--text3);margin-top:0.3rem}
+  .vf-scores{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:0.5rem;margin-top:0.7rem}
+  .vf-score .lbl{font-size:0.62rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--text3);
+                 display:flex;justify-content:space-between}
+  .vf-score .lbl b{color:var(--text2);font-family:var(--font-mono,var(--font-main))}
+  .vf-bar{height:5px;border-radius:3px;background:rgba(255,255,255,0.07);margin-top:0.25rem;overflow:hidden}
+  .vf-bar i{display:block;height:100%;border-radius:3px}
+  .f-auth{background:linear-gradient(90deg,#22d3ee,#0ea5e9)}
+  .f-rel{background:linear-gradient(90deg,#a78bfa,#7c3aed)}
+  .f-qual{background:linear-gradient(90deg,#4ade80,#16a34a)}
+  .f-over{background:linear-gradient(90deg,#fbbf24,#f59e0b)}
+  .vf-reasons{margin-top:0.6rem;font-size:0.76rem;color:var(--text2);line-height:1.5}
+  .vf-reasons li{margin-bottom:0.18rem}
+  .vf-detail{margin-top:0.85rem;padding-top:0.85rem;border-top:1px dashed var(--border);display:none}
+  .vf-detail.open{display:block}
+  .vf-dgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:1rem}
+  .vf-dsec h4{font-size:0.68rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--cyan);margin:0 0 0.4rem}
+  .vf-kv{font-size:0.75rem;color:var(--text2);display:flex;justify-content:space-between;gap:0.6rem;
+         padding:0.16rem 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+  .vf-kv span:last-child{color:var(--text);text-align:right;font-family:var(--font-mono,var(--font-main))}
+  .vf-check{display:flex;align-items:baseline;gap:0.5rem;font-size:0.75rem;color:var(--text2);
+             padding:0.2rem 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+  .vf-check .ic{flex-shrink:0;width:1.1rem;text-align:center;font-weight:700;font-family:var(--font-mono,var(--font-main))}
+  .vf-check.ok .ic{color:var(--green,#4ade80)}
+  .vf-check.bad .ic{color:var(--red,#ff4757)}
+  .vf-check.unk .ic{color:var(--text3)}
+  .vf-check .lb{color:var(--text);flex-shrink:0}
+  .vf-check .lb i{color:var(--text3);font-style:normal;font-size:0.68rem}
+  .vf-check .dt{color:var(--text3);font-size:0.7rem;text-align:right;margin-left:auto;overflow-wrap:anywhere}
+  .vf-src-badges{display:flex;flex-wrap:wrap;gap:0.35rem;margin:0.5rem 0}
+  .vf-src-badge{font-size:0.68rem;padding:0.2rem 0.5rem;border-radius:5px;border:1px solid var(--border);
+                background:var(--glass2);color:var(--text3);font-family:var(--font-mono,var(--font-main))}
+  .vf-src-badge.hit{color:var(--green,#4ade80);border-color:rgba(74,222,128,0.35);background:rgba(74,222,128,0.08)}
+  .vf-note{font-size:0.72rem;color:var(--text3);line-height:1.55;margin-top:0.5rem;
+           border-left:2px solid var(--border2);padding-left:0.7rem}
+  .vf-empty{color:var(--text3);font-size:0.85rem;padding:1.5rem 0;text-align:center}
+  .vf-more{width:100%;padding:0.6rem;border-radius:10px;background:var(--glass2);border:1px solid var(--border);
+           color:var(--text2);font-family:var(--font-main);font-size:0.8rem;cursor:pointer}
+  .vf-more:hover{border-color:var(--border2);color:var(--text)}
+</style>
+</head>
+<body>
+
+<div class="vf-wrap">
+  <div class="vf-header">
+    <h1>Paper Verification</h1>
+    <p>Every paper that entered an analysis run — standard or deep research — put through three levels —
+       authenticity, relevance, quality — with the evidence behind each verdict. Rejected papers are kept here on purpose: what was
+       thrown out and why is the auditable half of the filter.</p>
+  </div>
+
+  <div class="vf-grid">
+    <div>
+      <div class="vf-card">
+        <h3>Runs</h3>
+        <div class="vf-filters" style="margin-bottom:0.7rem">
+          <select id="fMode" style="width:100%">
+            <option value="">All runs</option>
+            <option value="standard">Standard analysis</option>
+            <option value="deep">Deep research</option>
+          </select>
+        </div>
+        <div id="runList"><div class="vf-empty">Loading…</div></div>
+      </div>
+    </div>
+
+    <div>
+      <div id="runSummary"></div>
+      <div class="vf-card">
+        <h3>Papers</h3>
+        <div class="vf-filters">
+          <select id="fStatus">
+            <option value="">All verdicts</option>
+            <option value="HIGHLY_VERIFIED">Highly verified</option>
+            <option value="VERIFIED">Verified</option>
+            <option value="PARTIALLY_VERIFIED">Partially verified</option>
+            <option value="UNVERIFIED">Unverified</option>
+            <option value="OFF_TOPIC">Off topic</option>
+            <option value="REJECTED">Rejected</option>
+            <option value="RETRACTED">Retracted</option>
+          </select>
+          <select id="fPassed">
+            <option value="">Kept and rejected</option>
+            <option value="true">Kept only</option>
+            <option value="false">Rejected only</option>
+          </select>
+          <select id="fType">
+            <option value="">All publication types</option>
+            <option value="JOURNAL_ARTICLE">Journal article</option>
+            <option value="CONFERENCE_PAPER">Conference paper</option>
+            <option value="REVIEW">Review</option>
+            <option value="SURVEY">Survey</option>
+            <option value="PREPRINT">Preprint</option>
+            <option value="CLINICAL_TRIAL">Clinical trial</option>
+            <option value="CASE_REPORT">Case report</option>
+            <option value="THESIS">Thesis</option>
+            <option value="BOOK">Book</option>
+            <option value="BOOK_CHAPTER">Book chapter</option>
+            <option value="DATASET">Dataset</option>
+            <option value="EDITORIAL">Editorial</option>
+            <option value="NEWS">News</option>
+            <option value="OTHER">Other</option>
+          </select>
+          <select id="fSort">
+            <option value="overall_score">Sort: overall</option>
+            <option value="authenticity_score">Sort: authenticity</option>
+            <option value="relevance_score">Sort: relevance</option>
+            <option value="quality_score">Sort: quality</option>
+            <option value="impact_score">Sort: impact</option>
+            <option value="year">Sort: year</option>
+            <option value="citation_count">Sort: citations</option>
+          </select>
+          <input type="text" id="fSearch" placeholder="Filter by title…"/>
+        </div>
+        <div id="paperList"><div class="vf-empty">Select a run.</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import '/static/js/firebase-auth.js';
+  await window.rlAuth.requireAuth();
+</script>
+<script>
+let RUNS = [], RUN = null, PAPERS = [], OFFSET = 0;
+const PAGE = 50;
+
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = (v, d = 1) => (v === null || v === undefined || v === '') ? '—' : Number(v).toFixed(d);
+// Three-way: null must read as "not checked", never as "no".
+const tri = (v, yes, no) => v === null || v === undefined ? 'not checked' : (v ? yes : no);
+
+async function loadRuns() {
+  const mode = document.getElementById('fMode').value;
+  const res = await fetch('/api/verification-runs?limit=50' + (mode ? '&mode=' + encodeURIComponent(mode) : ''));
+  const data = await res.json();
+  RUNS = data.runs || [];
+  const list = document.getElementById('runList');
+  if (!RUNS.length) {
+    list.innerHTML = '<div class="vf-empty">No verification runs yet. Run an analysis (standard or deep research) first.</div>';
+    document.getElementById('runSummary').innerHTML = '';
+    document.getElementById('paperList').innerHTML = '<div class="vf-empty">Select a run.</div>';
+    return;
+  }
+  list.innerHTML = RUNS.map(r => `
+    <button class="vf-run" data-id="${r.id}" onclick="selectRun(${r.id})">
+      ${esc(r.topic)}
+      <span class="vf-run-meta">${esc((r.created_at || '').slice(0, 16).replace('T', ' '))}
+        · ${r.mode === 'standard' ? 'standard' : 'deep' + (r.speed ? ' (' + esc(r.speed) + ')' : '')}
+        · ${r.papers_kept} kept · ${r.papers_rejected} rejected</span>
+    </button>`).join('');
+  selectRun(RUNS[0].id);
+}
+
+async function selectRun(id) {
+  document.querySelectorAll('.vf-run').forEach(b =>
+    b.classList.toggle('active', Number(b.dataset.id) === id));
+  const res = await fetch(`/api/verification-runs/${id}`);
+  RUN = await res.json();
+  renderSummary();
+  OFFSET = 0;
+  loadPapers(true);
+}
+
+function renderSummary() {
+  const r = RUN, v = r.venue_verification || {}, a = r.author_verification || {},
+        sem = r.semantic_similarity || {};
+  const statusChips = Object.entries(r.status_counts || {})
+    .map(([k, n]) => `<span class="vf-badge b-${esc(k)}">${esc(k.replace(/_/g, ' '))} ${n}</span>`).join(' ');
+  const typeChips = Object.entries(r.publication_type_counts || {})
+    .sort((x, y) => y[1] - x[1])
+    .map(([k, n]) => `<span class="vf-chip">${esc(k.replace(/_/g, ' ').toLowerCase())} · ${n}</span>`).join('');
+
+  document.getElementById('runSummary').innerHTML = `
+    <div class="vf-card">
+      <h3>${esc(r.topic)}</h3>
+      <div class="vf-stats">
+        <div class="vf-stat"><div class="k">Papers verified</div><div class="v">${r.papers_total}</div>
+          <div class="s">${r.papers_kept} kept · ${r.papers_rejected} rejected</div></div>
+        <div class="vf-stat"><div class="k">Crossref</div><div class="v">${r.crossref_resolved}/${r.crossref_checked}</div>
+          <div class="s">DOIs resolved${r.crossref_errors ? ` · ${r.crossref_errors} errors` : ''}</div></div>
+        <div class="vf-stat"><div class="k">Second registry</div>
+          <div class="v">${r.openalex_matched + r.semantic_scholar_matched}</div>
+          <div class="s">OpenAlex ${r.openalex_matched} · S2 ${r.semantic_scholar_matched}</div></div>
+        <div class="vf-stat"><div class="k">No DOI</div><div class="v">${r.papers_without_doi}</div>
+          <div class="s">${r.bibliographic_search_matched}/${r.bibliographic_search_attempted} matched by title+author</div></div>
+        <div class="vf-stat"><div class="k">Retracted</div><div class="v">${r.retracted_count}</div>
+          <div class="s">excluded from ranking</div></div>
+      </div>
+      <div class="vf-chips" style="margin-top:0.9rem">${statusChips}</div>
+      <div class="vf-chips">${typeChips}</div>
+      <div class="vf-note">Gate thresholds for this run: authenticity ≥ ${num(r.thresholds.authenticity_min, 0)},
+        relevance ≥ ${num(r.thresholds.relevance_min, 0)}, uncorroborated ceiling
+        ${num(r.thresholds.uncorroborated_ceiling, 0)}. Papers are rejected only on positive evidence of a
+        problem — an unresolvable identifier, metadata contradicted by an independent registry, a retraction,
+        or a non-research publication type. A paper that simply could not be corroborated is kept and
+        labelled unverified.</div>
+    </div>
+
+    <div class="vf-card">
+      <h3>Venue &amp; publisher verification</h3>
+      <div class="vf-stats">
+        <div class="vf-stat"><div class="k">Venues resolved</div>
+          <div class="v">${v.papers_with_venue_record ?? '—'}</div>
+          <div class="s">by ISSN ${v.venues_resolved_by_issn ?? 0} · by name ${v.venues_resolved_by_name ?? 0}</div></div>
+        <div class="vf-stat"><div class="k">Not in registry</div>
+          <div class="v">${v.papers_without_venue_record ?? '—'}</div>
+          <div class="s">venue component dropped, not zeroed</div></div>
+        <div class="vf-stat"><div class="k">DOAJ confirmed</div>
+          <div class="v">${v.doaj_confirmed ?? 0}/${v.doaj_checked ?? 0}</div>
+          <div class="s">independent indexing witness</div></div>
+        <div class="vf-stat"><div class="k">Publisher agreement</div>
+          <div class="v">${(v.publisher_agreement_counts || {}).agree ?? '—'}</div>
+          <div class="s">${(v.publisher_agreement_counts || {}).disagree ?? 0} disagree ·
+            ${(v.publisher_agreement_counts || {}).not_checked ?? 0} unchecked</div></div>
+      </div>
+      <div class="vf-note"><b>No quartile is shown anywhere in this tool, by design.</b>
+        ${esc(v.quartile_basis || 'Q1–Q4 quartiles come from Scopus (SJR) and Web of Science (JCR), neither of which exposes a free API or a redistributable dataset. No quartile is inferred or guessed.')}
+        Venue quality here is built from OpenAlex's own per-venue record — h-index, 2-year mean citedness,
+        CWTS Leiden core-collection membership, DOAJ indexing and source type. Conference venues are not
+        penalized: a strong conference earns a strong score through its real citedness.</div>
+    </div>
+
+    <div class="vf-card">
+      <h3>Relevance: semantic similarity</h3>
+      <div class="vf-stats">
+        <div class="vf-stat"><div class="k">Method used this run</div>
+          <div class="v" style="font-size:1.05rem">${esc(sem.method || 'unknown')}</div>
+          <div class="s">${sem.method === 'sentence_transformer'
+              ? `real embedding cosine (model: ${esc(sem.model || '—')})`
+              : 'lexical TF-IDF cosine, used as the fallback'}</div></div>
+      </div>
+      <div class="vf-note">${sem.method === 'sentence_transformer'
+          ? 'A sentence-transformer model was available in this deployment, so the semantic_similarity ' +
+            'component of relevance scoring used real embedding cosine similarity rather than lexical overlap.'
+          : `The sentence-transformer model was not available in this deployment${sem.reason ? ` (${esc(sem.reason)})` : ''}, ` +
+            'so the semantic_similarity component fell back to TF-IDF cosine — a lexical/statistical ' +
+            'measure, not a semantic-embedding one. This is reported honestly rather than labelled ' +
+            '"semantic similarity" without qualification. Install sentence-transformers + torch to enable ' +
+            'the real embedding path.'}</div>
+    </div>
+
+    <div class="vf-card">
+      <h3>Author verification (ORCID)</h3>
+      <div class="vf-stats">
+        <div class="vf-stat"><div class="k">iDs resolved</div>
+          <div class="v">${a.orcids_resolved ?? '—'}/${a.orcids_checked ?? 0}</div>
+          <div class="s">of ${a.orcids_seen ?? 0} seen</div></div>
+        <div class="vf-stat"><div class="k">Failed check digit</div>
+          <div class="v">${a.orcids_invalid_checksum ?? 0}</div>
+          <div class="s">cannot be real iDs</div></div>
+        <div class="vf-stat"><div class="k">Unresolved</div>
+          <div class="v">${a.orcids_unresolved ?? 0}</div>
+          <div class="s">well-formed, no registry record</div></div>
+        <div class="vf-stat"><div class="k">Papers with no iD</div>
+          <div class="v">${a.papers_without_orcid ?? '—'}</div>
+          <div class="s">not penalized — component dropped</div></div>
+      </div>
+      <div class="vf-note">Each iD's ISO 7064 MOD 11-2 check digit is validated offline first, so a fabricated
+        iD is caught before any network call. Resolving iDs are then compared against the paper's author
+        list. A name mismatch is reported but weighted mildly — legitimate name changes, transliterations and
+        initials-only author lists all produce one. None of this reaches the authenticity score or the reject
+        gate: author metadata is a quality signal, and no paper is rejected because an ORCID did not resolve.</div>
+    </div>`;
+}
+
+async function loadPapers(reset) {
+  const qs = new URLSearchParams({ limit: PAGE, offset: OFFSET, breakdowns: 'true',
+                                   sort: document.getElementById('fSort').value });
+  const st = document.getElementById('fStatus').value;
+  const pa = document.getElementById('fPassed').value;
+  const ty = document.getElementById('fType').value;
+  if (st) qs.set('status', st);
+  if (pa) qs.set('passed', pa);
+  if (ty) qs.set('publication_type', ty);
+  const res = await fetch(`/api/verification-runs/${RUN.id}/papers?${qs}`);
+  const data = await res.json();
+  PAPERS = reset ? (data.papers || []) : PAPERS.concat(data.papers || []);
+  renderPapers(data.count === PAGE);
+}
+
+function scoreBlock(label, value, cls) {
+  const pct = Math.max(0, Math.min(100, Number(value) || 0));
+  return `<div class="vf-score"><div class="lbl"><span>${label}</span><b>${num(value)}</b></div>
+          <div class="vf-bar"><i class="${cls}" style="width:${pct}%"></i></div></div>`;
+}
+
+function kv(k, v) { return `<div class="vf-kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`; }
+
+function detailHtml(p, i) {
+  const comp = o => Object.entries(o || {})
+    .map(([k, c]) => kv(k.replace(/_/g, ' '), `${num(c.value, 3)} @ ${num(c.weight_pct, 1)}%`)).join('')
+    || '<div class="vf-kv"><span>no components scored</span><span>—</span></div>';
+  // NOTE: the backend records each check's outcome under `result`
+  // (see paper_verification.py's record() closure), not `passed` —
+  // reading the wrong key here used to silently render every single
+  // check as "not checked" regardless of its real outcome, which
+  // defeated the entire point of this panel. Rendered as an explicit
+  // checkmark list (architecture-review item 6) rather than a bare
+  // key/value row, since "✓ DOI resolved" reads far better in a
+  // professor demo than "identifier resolves: pass".
+  const checkIcon = r => r === true ? '✓' : r === false ? '✗' : '○';
+  const checkCls = r => r === true ? 'ok' : r === false ? 'bad' : 'unk';
+  const checks = Object.entries(p.authenticity_checks || {}).map(([k, c]) =>
+    `<div class="vf-check ${checkCls(c.result)}">
+       <span class="ic">${checkIcon(c.result)}</span>
+       <span class="lb">${esc(k.replace(/_/g, ' '))}${c.points ? ` <i>(${c.points} pt)</i>` : ''}</span>
+       <span class="dt">${esc(c.detail == null ? (c.result === null ? 'not checked' : '') : (Array.isArray(c.detail) ? c.detail.join(', ') : c.detail))}</span>
+     </div>`).join('');
+  const orcids = (p.author_orcid_checks || []).map(c =>
+    kv(c.orcid, `${c.status.replace(/_/g, ' ')}${c.registered_name ? ' · ' + c.registered_name : ''}`)).join('')
+    || '<div class="vf-kv"><span>no ORCID iD on this record</span><span>not checked</span></div>';
+
+  return `<div class="vf-detail" id="d${i}"><div class="vf-dgrid">
+    <div class="vf-dsec"><h4>Level 1 — authenticity checks</h4>${checks || kv('no checks recorded', '—')}
+      ${kv('basis', p.authenticity_basis || '—')}
+      ${kv('corroborated by', (p.corroborating_registries || []).join(', ') || 'none')}</div>
+    <div class="vf-dsec"><h4>Level 2 — relevance components</h4>${comp(p.relevance_components)}</div>
+    <div class="vf-dsec"><h4>Level 3 — quality components</h4>${comp(p.quality_components)}
+      ${kv('metadata completeness', num(p.metadata_completeness, 2))}
+      ${kv('missing fields', (p.metadata_missing || []).join(', ') || 'none')}</div>
+    <div class="vf-dsec"><h4>Venue record</h4>
+      ${kv('lookup', p.venue_lookup_basis || 'not found in OpenAlex /sources')}
+      ${kv('venue quality', num(p.venue_quality_registry, 3))}
+      ${kv('h-index', p.venue_h_index ?? '—')}
+      ${kv('2yr mean citedness', num(p.venue_two_yr_mean_citedness, 2))}
+      ${kv('CWTS Leiden core', tri(p.venue_is_core, 'yes', 'no'))}
+      ${kv('in DOAJ', tri(p.venue_in_doaj, 'yes', 'no'))}
+      ${kv('registered publisher', p.venue_publisher || '—')}
+      ${kv('publisher agreement', (p.publisher_agreement || 'not checked').replace(/_/g, ' '))}
+      ${kv('quartile', 'not available — see note above')}</div>
+    <div class="vf-dsec"><h4>Authors (ORCID)</h4>${orcids}
+      ${kv('affiliations on file', (p.author_verified_affiliations || []).join('; ') || '—')}
+      ${kv('other works on iD', p.author_orcid_works_count ?? '—')}</div>
+    <div class="vf-dsec"><h4>Impact</h4>
+      ${kv('impact score', num(p.impact_score))}
+      ${kv('basis', (p.impact_score_basis || '—').replace(/_/g, ' '))}
+      ${kv('citations', p.citation_count ?? '—')}
+      ${kv('influential citations', p.influential_citation_count ?? '—')}
+      ${comp(p.impact_score_components)}</div>
+  </div></div>`;
+}
+
+function renderPapers(hasMore) {
+  const q = (document.getElementById('fSearch').value || '').toLowerCase();
+  const list = PAPERS.filter(p => !q || (p.title || '').toLowerCase().includes(q));
+  const el = document.getElementById('paperList');
+  if (!list.length) { el.innerHTML = '<div class="vf-empty">No papers match these filters.</div>'; return; }
+
+  el.innerHTML = list.map((p, i) => `
+    <div class="vf-paper ${p.passed_verification ? '' : 'failed'}">
+      <div class="vf-ptop">
+        <div style="flex:1">
+          <div class="vf-ptitle" onclick="toggleDetail(${i})">${esc(p.title)}</div>
+          <div class="vf-pmeta">${esc(p.venue || 'no venue')} · ${esc(p.year || '—')} ·
+            ${esc(p.source || '')}${p.doi ? ' · ' + esc(p.doi) : ''}</div>
+          <div class="vf-src-badges">
+            ${['ArXiv', 'OpenAlex', 'Semantic Scholar', 'Crossref', 'DBLP', 'PubMed'].map(src => {
+              const hit = (p.corroborating_registries || []).includes(src)
+                       || (p.also_indexed_by || []).some(s => (s || '').startsWith(src));
+              return hit ? `<span class="vf-src-badge hit">${esc(src)} ✓</span>` : '';
+            }).filter(Boolean).join('') || '<span class="vf-src-badge">no independent corroboration</span>'}
+          </div>
+          <div class="vf-chips">
+            <span class="vf-chip">${esc((p.publication_type || 'OTHER').replace(/_/g, ' ').toLowerCase())}</span>
+            <span class="vf-chip">peer reviewed: ${esc(String(p.peer_reviewed))}</span>
+            ${p.is_retracted === true ? '<span class="vf-chip" style="color:#fca5a5">⚠ retracted</span>' : ''}
+            ${p.venue_is_core ? '<span class="vf-chip">CWTS Leiden core venue</span>' : ''}
+            ${p.venue_in_doaj ? '<span class="vf-chip">DOAJ indexed</span>' : ''}
+            ${p.author_orcid_status && p.author_orcid_status !== 'not_checked'
+              ? `<span class="vf-chip">ORCID: ${esc(p.author_orcid_status.replace(/_/g, ' '))}</span>` : ''}
+            ${p.publisher_agreement === 'disagree'
+              ? '<span class="vf-chip" style="color:#fdba74">publisher mismatch</span>' : ''}
+            ${p.relevance_similarity_method === 'sentence_transformer'
+              ? '<span class="vf-chip">semantic: transformer</span>'
+              : p.relevance_similarity_method === 'tfidf_fallback'
+              ? '<span class="vf-chip">semantic: tfidf fallback</span>' : ''}
+          </div>
+        </div>
+        <span class="vf-badge b-${esc(p.verification_status)}">${esc((p.verification_status || '').replace(/_/g, ' '))}</span>
+      </div>
+      <div class="vf-scores">
+        ${scoreBlock('Authenticity', p.authenticity_score, 'f-auth')}
+        ${scoreBlock('Relevance', p.relevance_score, 'f-rel')}
+        ${scoreBlock('Quality', p.quality_score, 'f-qual')}
+        ${scoreBlock('Overall', p.passed_verification ? p.overall_score : p.overall_score_blended, 'f-over')}
+      </div>
+      ${!p.passed_verification && p.overall_score === 0 ? `<div class="vf-note">Overall is zeroed because this
+        paper failed the gate — the four component scores above are kept intact for the audit trail, and the
+        blended figure it would have scored was ${num(p.overall_score_blended)}.</div>` : ''}
+      <ul class="vf-reasons">${(p.verification_reasons || []).map(r => `<li>${esc(r)}</li>`).join('')}</ul>
+      ${detailHtml(p, i)}
+    </div>`).join('')
+    + (hasMore ? '<button class="vf-more" onclick="loadMore()">Load more papers</button>' : '');
+}
+
+function toggleDetail(i) { document.getElementById('d' + i).classList.toggle('open'); }
+function loadMore() { OFFSET += PAGE; loadPapers(false); }
+
+['fStatus', 'fPassed', 'fType', 'fSort'].forEach(id =>
+  document.getElementById(id).addEventListener('change', () => { OFFSET = 0; loadPapers(true); }));
+document.getElementById('fSearch').addEventListener('input', () => renderPapers(false));
+document.getElementById('fMode').addEventListener('change', loadRuns);
+
+// firebase-auth.js is a deferred module, so it patches window.fetch (to add the
+// Authorization header) only AFTER this classic script has already run. Calling
+// loadRuns() immediately sent an unauthenticated request -> 401. Wait for auth.
+(async () => {
+  while (!window.rlAuth) await new Promise(r => setTimeout(r, 25));
+  if (await window.rlAuth.requireAuth()) loadRuns();
+})();
+</script>
+</body>
+</html>

@@ -16,7 +16,7 @@ from .publication_agents import DomainClassificationAgent
 from .deep_agents import (
     DeepCollectionAgent, TrendGapDetectionAgent,
     DomainUnderstandingAgent, CurrentTrendsAgent, FullTextAnalysisAgent,
-    TrendForecastingAgent,
+    TrendForecastingAgent, PaperVerificationAgent,
 )
 
 __all__ = [
@@ -30,5 +30,5 @@ __all__ = [
     'DomainClassificationAgent',
     'DeepCollectionAgent', 'TrendGapDetectionAgent',
     'DomainUnderstandingAgent', 'CurrentTrendsAgent', 'FullTextAnalysisAgent',
-    'TrendForecastingAgent',
+    'TrendForecastingAgent', 'PaperVerificationAgent',
 ]

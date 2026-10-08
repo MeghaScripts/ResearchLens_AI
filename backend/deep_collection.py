@@ -57,34 +57,120 @@ import time
 import math
 import difflib
 import datetime as _dt
+import threading
 import requests
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, wait
 
 from academic_sources import fetch_europe_pmc_page
+import provenance
 
 STAGE1_TOP_N = 100
 STAGE2_TOP_N = 500
 
-# How many papers, at most, this module will pull from a *single* source
-# for one topic before it stops paging and moves on to the next source.
-# Flowchart stage 3 says "do NOT stop at 100/500 papers" — the real
-# stopping condition for a source is now its own pagination running dry
-# (a page returning zero new papers after dedup) or the source itself
-# erroring/timing out, exactly as the flowchart's "continue until no
-# more results" describes. PER_SOURCE_CAP is no longer a routine ceiling
-# that broad topics are expected to hit — it is only a last-resort
-# circuit breaker against a pagination bug that never reports "no more
-# results" (an API that keeps returning a full page forever). Default is
-# set high enough (50,000/source) that it should never be the reason a
-# real collection run stops; DEEP_COLLECTION_PER_SOURCE_CAP can raise it
-# further for sources known to have larger real corpora.
-PER_SOURCE_CAP = int(os.environ.get('DEEP_COLLECTION_PER_SOURCE_CAP', '50000'))
+# ─── Speed / size limits ─────────────────────────────────────────────
+#
+# Stage 0 used to page every source one after another, up to 500 pages
+# and 50,000 papers each, per query. Only the top 100 papers per source
+# (STAGE1_TOP_N) and the top 500 overall (STAGE2_TOP_N) are ever used,
+# so most of that time went into papers that were discarded. Sources
+# also ran one at a time, so the total was the SUM of every source's
+# paging time, which blew through the 120 s gunicorn timeout.
+#
+# Now: (1) every source is collected in PARALLEL, (2) each source has a
+# page cap, a paper cap and a wall-clock budget, (3) the whole stage has
+# a wall-clock budget, after which still-running sources are stopped
+# and whatever they already collected is kept. Search APIs return
+# results relevance-ranked, so the first few hundred hits per source
+# are the ones that matter for impact ranking.
+#
+# Callers pick a preset with the request's "speed" field:
+#   fast        (default) ~500 papers/source, 5 pages, ~35 s for Stage 0
+#   balanced    ~1000 papers/source, 10 pages, ~55 s for Stage 0
+#   exhaustive  the previous near-unbounded behaviour (can take many minutes)
+# DEEP_COLLECTION_SPEED changes the default, and the older
+# DEEP_COLLECTION_PER_SOURCE_CAP / DEEP_COLLECTION_MAX_PAGES env vars
+# still override the preset's values when set.
+def _env_int(name):
+    raw = os.environ.get(name)
+    try:
+        return int(raw) if raw not in (None, '') else None
+    except ValueError:
+        return None
+
+
 PAGE_SIZE = 100
-# MAX_PAGES is the actual exhaustion bound in practice (stall detection
-# below stops earlier on any source that truly runs dry) — kept
-# independent of PER_SOURCE_CAP so raising the safety-net cap doesn't
-# also inflate this into an unreasonable number of network calls.
-MAX_PAGES = int(os.environ.get('DEEP_COLLECTION_MAX_PAGES', '500'))
+# Kept for backward compatibility with code/tests that import them;
+# these are the "exhaustive" values. Presets below are what a normal
+# run uses.
+PER_SOURCE_CAP = _env_int('DEEP_COLLECTION_PER_SOURCE_CAP') or 50000
+MAX_PAGES = _env_int('DEEP_COLLECTION_MAX_PAGES') or 500
+
+DEEP_SPEED_PRESETS = {
+    'fast': {
+        'per_source_cap': 500, 'max_pages': 5, 'max_queries': 3,
+        'source_budget_s': 25, 'total_budget_s': 35, 'backfill_budget_s': 10,
+        'max_workers': 12,
+        'verify_network_top_n': 50, 'full_text_top_n': 25,
+    },
+    'balanced': {
+        'per_source_cap': 1000, 'max_pages': 10, 'max_queries': 4,
+        'source_budget_s': 40, 'total_budget_s': 55, 'backfill_budget_s': 20,
+        'max_workers': 12,
+        'verify_network_top_n': 100, 'full_text_top_n': 50,
+    },
+    'exhaustive': {
+        'per_source_cap': PER_SOURCE_CAP, 'max_pages': MAX_PAGES, 'max_queries': 50,
+        'source_budget_s': 900, 'total_budget_s': 1200, 'backfill_budget_s': 600,
+        'max_workers': 12,
+        'verify_network_top_n': None, 'full_text_top_n': None,
+    },
+}
+DEFAULT_SPEED = (os.environ.get('DEEP_COLLECTION_SPEED') or 'fast').strip().lower()
+if DEFAULT_SPEED not in DEEP_SPEED_PRESETS:
+    DEFAULT_SPEED = 'fast'
+
+
+def resolve_limits(speed=None):
+    """Returns the limits dict for a speed preset name (unknown or empty
+    names fall back to the default preset). Env overrides for the paper
+    cap and page cap apply on top of a non-exhaustive preset only when
+    explicitly set."""
+    name = (speed or DEFAULT_SPEED or 'fast')
+    name = str(name).strip().lower()
+    if name not in DEEP_SPEED_PRESETS:
+        name = DEFAULT_SPEED
+    limits = dict(DEEP_SPEED_PRESETS[name])
+    limits['speed'] = name
+    if name != 'exhaustive':
+        env_cap = _env_int('DEEP_COLLECTION_PER_SOURCE_CAP')
+        env_pages = _env_int('DEEP_COLLECTION_MAX_PAGES')
+        if env_cap:
+            limits['per_source_cap'] = env_cap
+        if env_pages:
+            limits['max_pages'] = env_pages
+    return limits
+
+
+class _Budget:
+    """Wall-clock deadline plus a cooperative cancel flag. One per source
+    (clock starts when that source actually begins running); the cancel
+    event is shared across all sources so the orchestrator can stop
+    stragglers once the whole stage is out of time."""
+
+    def __init__(self, seconds=None, cancel_event=None):
+        self.deadline = (time.monotonic() + seconds) if seconds else None
+        self.cancel_event = cancel_event or threading.Event()
+        self.cut_short = False
+
+    def expired(self):
+        if self.cancel_event.is_set() or (
+                self.deadline is not None and time.monotonic() >= self.deadline):
+            self.cut_short = True
+            return True
+        return False
+
+
 BETWEEN_PAGE_DELAY = 0.4       # polite pause between pages of the same source
 DBLP_PAGE_DELAY = 2.5          # DBLP resets connections on bursts (see app.py's venue path)
 
@@ -143,12 +229,24 @@ class PaperDeduper:
                       'abstract', 'year', 'keywords_native', 'pmcid', 'is_open_access',
                       'core_id', 'arxiv_id', 'citation_percentile_band',
                       'reference_titles', 'openalex_id', 'referenced_works',
-                      'author_ids_ss', 'author_ids_openalex', 'institution_ids_openalex')
+                      'author_ids_ss', 'author_ids_openalex', 'institution_ids_openalex',
+                      # Needed by paper_verification: a PubMed record's
+                      # PublicationType list (and its PMID) must survive
+                      # being merged into a copy from another source,
+                      # otherwise the merged paper silently loses the
+                      # only authoritative publication-type and
+                      # retraction signal it had.
+                      'publication_types_native', 'pmid',
+                      'ss_id', 'dblp_key', 'inspire_id', 'isbn',
+                      'author_max_works_count')
 
     def __init__(self):
         self._by_doi = {}
         self._by_title = {}
         self._by_author_year = {}
+        # Cached character counts per indexed title, for the cheap
+        # upper-bound prefilter in _fuzzy_title_match.
+        self._title_counters = {}
 
     @staticmethod
     def _norm_doi(doi):
@@ -225,9 +323,25 @@ class PaperDeduper:
         year = _paper_year(paper)
         authors = {(a or '').split()[-1].lower() for a in (paper.get('authors') or []) if a}
         title_digits = re.sub(r'\D+', ' ', title).split()
+        title_counter = Counter(title)
+        title_len = len(title)
         for existing_title, existing_paper in self._by_title.items():
-            if abs(len(existing_title) - len(title)) > 15:
+            if abs(len(existing_title) - title_len) > 15:
                 continue  # cheap pre-filter before the real comparison
+            # difflib.SequenceMatcher.ratio() is the expensive step and this
+            # loop used to run it against EVERY indexed title for EVERY new
+            # paper (quadratic; ~15 s for 500 papers, minutes for the old
+            # multi-thousand-paper collections). The ratio can never exceed
+            # 2*(shared characters)/(len_a + len_b) - difflib's own
+            # quick_ratio() bound - so any pair below the threshold on that
+            # bound cannot pass the real check either. Skipping those pairs
+            # changes no result, only the time taken.
+            ec = self._title_counters.get(existing_title)
+            if ec is None:
+                ec = self._title_counters[existing_title] = Counter(existing_title)
+            shared = sum((title_counter & ec).values())
+            if 2.0 * shared / (title_len + len(existing_title)) < self.TITLE_SIMILARITY_THRESHOLD:
+                continue
             if difflib.SequenceMatcher(None, title, existing_title).ratio() < self.TITLE_SIMILARITY_THRESHOLD:
                 continue
             if title_digits != re.sub(r'\D+', ' ', existing_title).split():
@@ -274,12 +388,31 @@ class PaperDeduper:
         if existing is None:
             existing_src = paper.get('source')
             paper.setdefault('also_indexed_by', [existing_src] if existing_src else [])
+            paper.setdefault('field_sources', (paper.get('field_sources') or {}))
             self._index(paper)
             return paper, True
 
+        merged_fields = []
         for field in self._MERGE_FIELDS:
             if not existing.get(field) and paper.get(field):
                 existing[field] = paper[field]
+                merged_fields.append(field)
+        # Core bibliographic fields (title/authors/year/venue/doi/
+        # abstract/citation_count) aren't all in _MERGE_FIELDS above —
+        # title/authors/venue/abstract are usually already present on
+        # `existing` (the record wouldn't have matched otherwise), so
+        # they're only actually copied when genuinely absent; doi and
+        # citation_count already are in _MERGE_FIELDS. Checked
+        # separately so field_sources stays accurate even for the
+        # fields _MERGE_FIELDS doesn't cover.
+        for field in provenance.PROVENANCE_FIELDS:
+            if field in self._MERGE_FIELDS:
+                continue
+            if not existing.get(field) and paper.get(field):
+                existing[field] = paper[field]
+                merged_fields.append(field)
+        provenance.merge_field_sources(existing, paper, merged_fields)
+        provenance.refresh_best_identifier(existing)
         existing.setdefault('also_indexed_by', [existing.get('source')] if existing.get('source') else [])
         src = paper.get('source')
         if src and src not in existing['also_indexed_by']:
@@ -290,7 +423,8 @@ class PaperDeduper:
 
 # ─── Stage 0: page a single source to (near) exhaustion ───────────────
 
-def collect_source_papers(name, fn, topic, deduper=None, collected=None, cap=None):
+def collect_source_papers(name, fn, topic, deduper=None, collected=None, cap=None,
+                          budget=None, max_pages=None):
     """Pages `fn` (a real fetch function, same signature/behavior as the
     ones in academic_sources.py / app.py) for `topic` until the source
     runs dry, `cap` is hit, or pagination stalls (a page adds zero new
@@ -308,10 +442,15 @@ def collect_source_papers(name, fn, topic, deduper=None, collected=None, cap=Non
     with no args (the original single-query behavior), each defaults to
     a fresh deduper/list/the module's PER_SOURCE_CAP."""
     cap = PER_SOURCE_CAP if cap is None else cap
+    max_pages = MAX_PAGES if max_pages is None else max_pages
+    if budget is not None and budget.expired():
+        return [] if collected is None else collected
     if name == 'Europe PMC':
-        return _collect_europe_pmc(topic, deduper=deduper, collected=collected, cap=cap)
+        return _collect_europe_pmc(topic, deduper=deduper, collected=collected, cap=cap,
+                                   budget=budget, max_pages=max_pages)
     if name.endswith('(via DBLP)'):
-        return _collect_dblp_venue(name, fn, topic, deduper=deduper, collected=collected, cap=cap)
+        return _collect_dblp_venue(name, fn, topic, deduper=deduper, collected=collected, cap=cap,
+                                   budget=budget, max_pages=max_pages)
 
     spec = PAGINATION_SPEC.get(name)
     deduper = PaperDeduper() if deduper is None else deduper
@@ -328,6 +467,7 @@ def collect_source_papers(name, fn, topic, deduper=None, collected=None, cap=Non
         for p in papers or []:
             if not p.get('title'):
                 continue
+            provenance.stamp_provenance(p, name)
             kept, is_new = deduper.add_or_merge(p)
             if is_new:
                 collected.append(kept)
@@ -335,7 +475,9 @@ def collect_source_papers(name, fn, topic, deduper=None, collected=None, cap=Non
 
     kwarg, one_based = spec
     cursor = 1 if one_based else 0
-    for _ in range(MAX_PAGES):
+    for _ in range(max_pages):
+        if budget is not None and budget.expired():
+            break
         try:
             papers = fn(topic, max_results=PAGE_SIZE, **{kwarg: cursor})
         except Exception as e:
@@ -347,6 +489,7 @@ def collect_source_papers(name, fn, topic, deduper=None, collected=None, cap=Non
         for p in papers:
             if not p.get('title'):
                 continue
+            provenance.stamp_provenance(p, name)
             kept, is_new = deduper.add_or_merge(p)
             if is_new:
                 collected.append(kept)
@@ -362,7 +505,8 @@ def collect_source_papers(name, fn, topic, deduper=None, collected=None, cap=Non
     return collected[:cap]
 
 
-def collect_source_papers_multi_query(name, fn, queries, cap=None):
+def collect_source_papers_multi_query(name, fn, queries, cap=None, budget=None,
+                                      max_pages=None, collected=None):
     """
     Runs collect_source_papers for this source across MULTIPLE related
     search queries — the original topic plus any LLM-suggested semantic
@@ -378,22 +522,31 @@ def collect_source_papers_multi_query(name, fn, queries, cap=None):
     """
     cap = PER_SOURCE_CAP if cap is None else cap
     deduper = PaperDeduper()
-    collected = []
+    # `collected` may be supplied by the caller so that a source that is
+    # stopped mid-way (time budget) still leaves its partial results
+    # readable by the caller.
+    collected = [] if collected is None else collected
     for q in queries:
         if not q or len(collected) >= cap:
             break
-        collect_source_papers(name, fn, q, deduper=deduper, collected=collected, cap=cap)
+        if budget is not None and budget.expired():
+            break
+        collect_source_papers(name, fn, q, deduper=deduper, collected=collected, cap=cap,
+                              budget=budget, max_pages=max_pages)
     return collected
 
 
-def _collect_europe_pmc(topic, deduper=None, collected=None, cap=None):
+def _collect_europe_pmc(topic, deduper=None, collected=None, cap=None, budget=None, max_pages=None):
     """Europe PMC pages via an opaque `nextCursorMark` token rather than a
     counter, so it gets its own loop using fetch_europe_pmc_page."""
     cap = PER_SOURCE_CAP if cap is None else cap
     deduper = PaperDeduper() if deduper is None else deduper
     collected = [] if collected is None else collected
     cursor = '*'
-    for _ in range(MAX_PAGES):
+    max_pages = MAX_PAGES if max_pages is None else max_pages
+    for _ in range(max_pages):
+        if budget is not None and budget.expired():
+            break
         papers, next_cursor = fetch_europe_pmc_page(topic, max_results=PAGE_SIZE, cursor_mark=cursor)
         if not papers:
             break
@@ -401,6 +554,7 @@ def _collect_europe_pmc(topic, deduper=None, collected=None, cap=None):
         for p in papers:
             if not p.get('title'):
                 continue
+            provenance.stamp_provenance(p, 'Europe PMC')
             kept, is_new = deduper.add_or_merge(p)
             if is_new:
                 collected.append(kept)
@@ -412,7 +566,8 @@ def _collect_europe_pmc(topic, deduper=None, collected=None, cap=None):
     return collected[:cap]
 
 
-def _collect_dblp_venue(name, fn, topic, deduper=None, collected=None, cap=None):
+def _collect_dblp_venue(name, fn, topic, deduper=None, collected=None, cap=None,
+                        budget=None, max_pages=None):
     """`fn` here is expected to be a partial/lambda over
     academic_sources.fetch_dblp_venue for one specific venue, called as
     fn(topic, max_results=.., first=..). Uses DBLP_PAGE_DELAY instead of
@@ -423,7 +578,10 @@ def _collect_dblp_venue(name, fn, topic, deduper=None, collected=None, cap=None)
     deduper = PaperDeduper() if deduper is None else deduper
     collected = [] if collected is None else collected
     first = 0
-    for _ in range(MAX_PAGES):
+    max_pages = MAX_PAGES if max_pages is None else max_pages
+    for _ in range(max_pages):
+        if budget is not None and budget.expired():
+            break
         try:
             papers = fn(topic, max_results=PAGE_SIZE, first=first)
         except Exception as e:
@@ -435,6 +593,7 @@ def _collect_dblp_venue(name, fn, topic, deduper=None, collected=None, cap=None)
         for p in papers:
             if not p.get('title'):
                 continue
+            provenance.stamp_provenance(p, name)
             kept, is_new = deduper.add_or_merge(p)
             if is_new:
                 collected.append(kept)
@@ -468,7 +627,7 @@ def _paper_external_id(paper):
     return None
 
 
-def backfill_citation_counts(papers, batch_size=SS_BATCH_SIZE):
+def backfill_citation_counts(papers, batch_size=SS_BATCH_SIZE, budget=None):
     """
     Impact score is only as good as the citation data behind it — a
     recency-only fallback tells you a paper is new, not that it's good.
@@ -508,6 +667,10 @@ def backfill_citation_counts(papers, batch_size=SS_BATCH_SIZE):
 
     filled = 0
     for i in range(0, len(ids), batch_size):
+        if budget is not None and budget.expired():
+            print("deep_collection: citation backfill stopped at its time budget "
+                  f"({i}/{len(ids)} ids looked up); remaining papers keep recency-only scoring")
+            break
         chunk = ids[i:i + batch_size]
         try:
             resp = requests.post(
@@ -583,7 +746,7 @@ def _get_openalex_venue_stats(venue_name):
     try:
         resp = requests.get(
             "https://api.openalex.org/sources",
-            params={'search': venue_name, 'per_page': 5, 'mailto': 'research@example.com'},
+            params={'search': venue_name, 'per_page': 5, 'mailto': 'megham112004@gmail.com'},
             timeout=15,
         )
         resp.raise_for_status()
@@ -699,6 +862,7 @@ def _fetch_openalex_author_stats(author_ids):
     a summary_stats.h_index for; anything else is absent, not guessed.
     """
     result = {}
+    works = {}
     ids = list(dict.fromkeys(a for a in author_ids if a))
     for i in range(0, len(ids), OPENALEX_BATCH_SIZE):
         chunk = ids[i:i + OPENALEX_BATCH_SIZE]
@@ -706,19 +870,26 @@ def _fetch_openalex_author_stats(author_ids):
             resp = requests.get(
                 "https://api.openalex.org/authors",
                 params={'filter': 'ids.openalex:' + '|'.join(chunk),
-                        'per_page': len(chunk), 'mailto': 'research@example.com'},
+                        'per_page': len(chunk), 'mailto': 'megham112004@gmail.com'},
                 timeout=15,
             )
             resp.raise_for_status()
             for rec in resp.json().get('results', []):
                 oaid = (rec.get('id') or '').replace('https://openalex.org/', '')
-                h_index = (rec.get('summary_stats') or {}).get('h_index')
+                stats = rec.get('summary_stats') or {}
+                h_index = stats.get('h_index')
                 if oaid and h_index is not None:
                     result[oaid] = h_index
+                # Real works_count from the same record — "does this
+                # author have other publications" (doc section 13),
+                # free on this already-made call.
+                works_count = rec.get('works_count')
+                if oaid and works_count is not None:
+                    works[oaid] = works_count
         except Exception as e:
             print(f"deep_collection: OpenAlex author-batch lookup failed: {e}")
             continue
-    return result
+    return result, works
 
 
 def _fetch_openalex_institution_stats(institution_ids):
@@ -736,7 +907,7 @@ def _fetch_openalex_institution_stats(institution_ids):
             resp = requests.get(
                 "https://api.openalex.org/institutions",
                 params={'filter': 'ids.openalex:' + '|'.join(chunk),
-                        'per_page': len(chunk), 'mailto': 'research@example.com'},
+                        'per_page': len(chunk), 'mailto': 'megham112004@gmail.com'},
                 timeout=15,
             )
             resp.raise_for_status()
@@ -754,11 +925,14 @@ def _fetch_openalex_institution_stats(institution_ids):
 def enrich_with_author_influence(papers):
     """
     Sets `author_max_h_index` (real, highest known h-index among a
-    paper's own authors) and `institution_influence` (real, highest
-    known 2yr_mean_citedness among a paper's authors' institutions) on
-    every paper in `papers` that has a real author/institution ID to
-    look up — via Semantic Scholar's and OpenAlex's free author/
-    institution-metrics APIs (see the three _fetch_* helpers above).
+    paper's own authors), `author_max_works_count` (real, highest known
+    OpenAlex works_count among a paper's own authors — a direct "does
+    this author have other publications" signal, doc section 13) and
+    `institution_influence` (real, highest known 2yr_mean_citedness
+    among a paper's authors' institutions) on every paper in `papers`
+    that has a real author/institution ID to look up — via Semantic
+    Scholar's and OpenAlex's free author/institution-metrics APIs (see
+    the three _fetch_* helpers above).
     Runs on the (already much smaller) Stage-2 combined pool, not the
     full raw collection, same reasoning as enrich_with_venue_influence:
     keeps the number of batched lookups bounded regardless of how many
@@ -780,7 +954,8 @@ def enrich_with_author_influence(papers):
     all_oa_inst_ids = [iid for p in papers for iid in (p.get('institution_ids_openalex') or [])]
 
     ss_h_index = _fetch_ss_author_h_index(all_ss_ids) if all_ss_ids else {}
-    oa_h_index = _fetch_openalex_author_stats(all_oa_author_ids) if all_oa_author_ids else {}
+    oa_h_index, oa_works_count = (
+        _fetch_openalex_author_stats(all_oa_author_ids) if all_oa_author_ids else ({}, {}))
     oa_inst_stats = _fetch_openalex_institution_stats(all_oa_inst_ids) if all_oa_inst_ids else {}
 
     author_count = 0
@@ -791,6 +966,10 @@ def enrich_with_author_influence(papers):
         if known:
             p['author_max_h_index'] = max(known)
             author_count += 1
+        known_works = [oa_works_count[aid] for aid in (p.get('author_ids_openalex') or [])
+                      if aid in oa_works_count]
+        if known_works:
+            p['author_max_works_count'] = max(known_works)
 
         inst_known = [oa_inst_stats[iid] for iid in (p.get('institution_ids_openalex') or [])
                       if iid in oa_inst_stats]
@@ -1080,7 +1259,8 @@ def stage2_combine_and_shortlist(stage1_result):
 
 # ─── Top-level orchestration ────────────────────────────────────────
 
-def run_two_stage_collection(topic, source_registry, progress_cb=None, extra_queries=None):
+def run_two_stage_collection(topic, source_registry, progress_cb=None, extra_queries=None,
+                             speed=None):
     """
     `source_registry`: {source_name: callable} built by the caller
     (app.py) from its own default-3 fetchers plus
@@ -1100,8 +1280,16 @@ def run_two_stage_collection(topic, source_registry, progress_cb=None, extra_que
     without multiplying the per-source cap or double-counting a paper
     that multiple queries turn up.
 
-    `progress_cb`, if given, is called with a short string before each
-    source is collected — useful for streaming status to a caller.
+    `progress_cb`, if given, is called with a short string at the start
+    of each stage (and once per source as it starts) — useful for
+    streaming status to a caller.
+
+    `speed`: 'fast' (default) / 'balanced' / 'exhaustive' — see
+    DEEP_SPEED_PRESETS. Sources are collected in parallel under a
+    per-source and a whole-stage time budget; the returned
+    `collection_limits` says exactly which limits applied and which
+    sources (if any) were stopped early, so a capped run is never
+    presented as an exhaustive one.
 
     Returns a dict with the Stage-0 collection counts, how many papers
     the citation backfill pass filled in, Stage-1 per-source shortlist
@@ -1113,27 +1301,76 @@ def run_two_stage_collection(topic, source_registry, progress_cb=None, extra_que
     limitation instead of presenting every score as equally
     well-evidenced.
     """
-    queries = [topic] + [q for q in (extra_queries or []) if q and q.strip() and q.strip() != topic]
-    source_to_papers = {}
-    for name, fn in source_registry.items():
+    limits = resolve_limits(speed)
+    queries = ([topic] + [q for q in (extra_queries or []) if q and q.strip() and q.strip() != topic])
+    queries = queries[:max(1, limits['max_queries'])]
+    t_start = time.monotonic()
+    cancel_event = threading.Event()
+
+    # name -> {'collected': [...], 'budget': _Budget|None}. The list is
+    # created here (not inside the worker) so partial results survive a
+    # worker that has to be abandoned at the stage deadline.
+    state = {name: {'collected': [], 'budget': None} for name in source_registry}
+
+    def _collect_one(name, fn):
+        budget = _Budget(limits['source_budget_s'], cancel_event)
+        state[name]['budget'] = budget
         if progress_cb:
             progress_cb(f"Collecting from {name}...")
+        collect_source_papers_multi_query(
+            name, fn, queries, cap=limits['per_source_cap'], budget=budget,
+            max_pages=limits['max_pages'], collected=state[name]['collected'])
+
+    if progress_cb:
+        progress_cb(f"Collecting from {len(source_registry)} sources in parallel "
+                    f"({limits['speed']} mode)...")
+    source_to_papers = {}
+    sources_cut_short, sources_abandoned = [], []
+    if source_registry:
+        pool = ThreadPoolExecutor(max_workers=max(1, min(len(source_registry), limits['max_workers'])))
+        futures = {pool.submit(_collect_one, name, fn): name for name, fn in source_registry.items()}
+        # A little grace beyond the stage budget: workers check their
+        # budget between pages, so one in-flight request may still finish.
+        done, pending = wait(list(futures), timeout=limits['total_budget_s'] + 5)
+        if pending:
+            cancel_event.set()   # cooperative stop for anything still paging
+        for fut, name in futures.items():
+            if fut in done:
+                try:
+                    fut.result()
+                except Exception as e:
+                    print(f"deep_collection: {name} failed entirely: {e}")
+            collected = state[name]['collected']
+            # Snapshot (copying the dicts for abandoned workers, which may
+            # still be merging into them) so later stages never race a
+            # background thread.
+            papers = list(collected) if fut in done else [dict(p) for p in list(collected)]
+            if fut in pending:
+                sources_abandoned.append(name)
+            elif state[name]['budget'] is not None and state[name]['budget'].cut_short:
+                sources_cut_short.append(name)
+            if papers:
+                source_to_papers[name] = papers
         try:
-            papers = collect_source_papers_multi_query(name, fn, queries)
-        except Exception as e:
-            print(f"deep_collection: {name} failed entirely: {e}")
-            papers = []
-        if papers:
-            source_to_papers[name] = papers
+            pool.shutdown(wait=False, cancel_futures=True)
+        except TypeError:   # Python < 3.9 has no cancel_futures
+            pool.shutdown(wait=False)
+    t_collected = time.monotonic()
+    if sources_cut_short or sources_abandoned:
+        print("deep_collection: stopped at time budget — cut short: "
+              f"{sources_cut_short}, abandoned: {sources_abandoned}")
 
     if progress_cb:
         progress_cb("Backfilling citation counts for sources with no native citation data...")
     all_collected = [p for papers in source_to_papers.values() for p in papers]
-    citations_backfilled = backfill_citation_counts(all_collected)
+    backfill_budget = _Budget(limits['backfill_budget_s'])
+    citations_backfilled = backfill_citation_counts(all_collected, budget=backfill_budget)
+    t_backfilled = time.monotonic()
 
     stage1_result, stage1_stats = stage1_rank_and_shortlist(source_to_papers)
     stage2_papers = stage2_combine_and_shortlist(stage1_result)
 
+    t_shortlisted = time.monotonic()
     if progress_cb:
         progress_cb("Looking up real per-venue impact stats (OpenAlex)...")
     enrich_with_venue_influence(stage2_papers)
@@ -1156,9 +1393,34 @@ def run_two_stage_collection(topic, source_registry, progress_cb=None, extra_que
     }
     has_citation_data = lambda bases: any(b in ('citation_velocity', 'citation_velocity_backfilled') for b in bases)
 
+    t_done = time.monotonic()
+    collection_limits = {
+        'speed': limits['speed'],
+        'per_source_cap': limits['per_source_cap'],
+        'max_pages_per_query': limits['max_pages'],
+        'max_queries': limits['max_queries'],
+        'source_budget_seconds': limits['source_budget_s'],
+        'total_budget_seconds': limits['total_budget_s'],
+        # Sources that hit their time budget and kept what they had so far.
+        'sources_cut_short_by_time': sorted(sources_cut_short),
+        # Sources still running at the stage deadline that were stopped.
+        'sources_stopped_at_stage_deadline': sorted(sources_abandoned),
+        'citation_backfill_cut_short': bool(backfill_budget.cut_short),
+        'is_exhaustive': limits['speed'] == 'exhaustive',
+        'seconds': {
+            'source_collection': round(t_collected - t_start, 1),
+            'citation_backfill': round(t_backfilled - t_collected, 1),
+            'ranking_and_shortlist': round(t_shortlisted - t_backfilled, 1),
+            'venue_author_enrichment': round(t_done - t_shortlisted, 1),
+            'stage_total': round(t_done - t_start, 1),
+        },
+    }
+    print(f"deep_collection: stage timings {collection_limits['seconds']}")
+
     return {
         'topic': topic,
         'queries_used': queries,
+        'collection_limits': collection_limits,
         'stage0_stats': {name: len(papers) for name, papers in source_to_papers.items()},
         'stage1_stats': stage1_stats,
         'stage2_papers': stage2_papers,
@@ -1452,6 +1714,18 @@ def validate_and_prioritize_gaps(gaps, papers, trend_stats):
         none of the matched papers carry any reference data at all —
         "no data" is never conflated with "checked and found nothing".
 
+    Also strips `evidence_papers` down to titles that ACTUALLY EXIST in
+    the collected corpus (architecture-review Phase 17/21): every title
+    the LLM cited is checked with an exact normalized-title match
+    against `papers`; a title that doesn't match anything real is
+    removed from `evidence_papers` and recorded in
+    `evidence_papers_unverified` instead, so a hallucinated citation
+    can never render in the report as if it were real evidence. If
+    EVERY cited title turns out to be unverifiable, the gap is kept
+    (an LLM-proposed gap can be real even when its own citation list is
+    bad) but `validation['all_evidence_papers_unverified']` is set True
+    so the UI/report can flag it rather than silently show empty proof.
+
     Also computes a `priority_score` per gap: a transparent blend of the
     LLM's own confidence_score, the real evidence_paper_count/recency
     above, and a small interconnection adjustment (documented weights
@@ -1494,7 +1768,24 @@ def validate_and_prioritize_gaps(gaps, papers, trend_stats):
                 terms.add(norm)
         return terms
 
+    corpus_titles_norm = {_normalize_title(p.get('title')) for p in papers if p.get('title')}
+
     for gap in gaps:
+        # --- hard evidence-paper check (Phase 17/21): drop any cited
+        # title that isn't an exact normalized match against a real
+        # collected paper. Runs BEFORE evidence_terms_for_gap, so the
+        # keyword/title matching below (which also reads
+        # gap['evidence_papers']) only ever draws on verified titles too
+        # — a hallucinated title can't sneak back in through that path
+        # either.
+        cited = list(gap.get('evidence_papers') or [])
+        verified_titles, unverified_titles = [], []
+        for title in cited:
+            (verified_titles if _normalize_title(title) in corpus_titles_norm
+             else unverified_titles).append(title)
+        gap['evidence_papers'] = verified_titles
+        gap['evidence_papers_unverified'] = unverified_titles
+
         terms = evidence_terms_for_gap(gap)
         matching_years, matched_papers = [], []
         if terms:
@@ -1519,6 +1810,31 @@ def validate_and_prioritize_gaps(gaps, papers, trend_stats):
                     if i != j and cites(sample[i], sample[j]):
                         citation_links += 1
 
+        # --- build the `validation` dict itself. This block was
+        # missing from the original implementation — every field below
+        # was referenced further down but never actually constructed,
+        # which meant this function raised NameError on any non-empty
+        # gap list. Fixed here; see the docstring above for what each
+        # field means.
+        oldest_evidence_year = min(matching_years) if matching_years else None
+        most_recent_evidence_year = max(matching_years) if matching_years else None
+        is_recently_active = bool(
+            recent_cutoff and any(y >= recent_cutoff for y in matching_years))
+        # "No reference data on any matched paper" and "checked and
+        # found zero links" are different findings — None vs 0/False —
+        # per the docstring's own honesty note.
+        citation_links_among_evidence = citation_links if has_reference_data else None
+        evidence_appears_interconnected = (
+            (citation_links > 0) if has_reference_data else None)
+        validation = {
+            'evidence_paper_count': len(matched_papers),
+            'oldest_evidence_year': oldest_evidence_year,
+            'most_recent_evidence_year': most_recent_evidence_year,
+            'is_recently_active': is_recently_active,
+            'citation_links_among_evidence': citation_links_among_evidence,
+            'evidence_appears_interconnected': evidence_appears_interconnected,
+        }
+
         # Flowchart stage-18 explicit "is it already solved?" check —
         # a real (if necessarily heuristic) signal rather than an
         # LLM self-report: a gap whose own matched evidence is both
@@ -1536,6 +1852,10 @@ def validate_and_prioritize_gaps(gaps, papers, trend_stats):
             and validation['is_recently_active']
         )
         validation['appears_already_addressed'] = appears_already_addressed
+        validation['evidence_papers_cited'] = len(cited)
+        validation['evidence_papers_verified'] = len(verified_titles)
+        validation['evidence_papers_dropped'] = len(unverified_titles)
+        validation['all_evidence_papers_unverified'] = bool(cited) and not verified_titles
         gap['validation'] = validation
 
         confidence = (gap.get('confidence_score') or 0) / 100.0

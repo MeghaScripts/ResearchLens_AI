@@ -31,10 +31,18 @@ class DeepCollectionAgent(BaseAgent):
         topic = context['topic']
         registry = self.registry_builder_fn(context)
         context['deep_sources_selected'] = list(registry.keys())
-        result = self.run_fn(topic, registry, extra_queries=context.get('deep_extra_queries'))
+        result = self.run_fn(topic, registry, extra_queries=context.get('deep_extra_queries'),
+                             speed=context.get('deep_speed'))
+        context['deep_collection_limits'] = result.get('collection_limits')
         context['deep_stage0_stats'] = result['stage0_stats']
         context['deep_stage1_stats'] = result['stage1_stats']
         context['deep_papers'] = result['stage2_papers']
+        # Captured before the verification agent can overwrite
+        # `deep_papers` with a filtered set — pipeline_stats (item 9)
+        # needs the true pre-verification corpus size to report
+        # "papers discovered" honestly.
+        context['deep_stage2_total'] = len(result['stage2_papers'])
+        context['deep_stage0_total'] = sum(result['stage0_stats'].values())
         context['deep_citations_backfilled'] = result['citations_backfilled']
         context['deep_sources_with_citation_data'] = result['sources_with_citation_data']
         context['deep_sources_recency_only'] = result['sources_recency_only']
@@ -213,7 +221,8 @@ class TrendGapDetectionAgent(BaseAgent):
         trend_stats = context.get('deep_trend_stats') or self.trend_stats_fn(papers)
         current_trends = context.get('deep_current_trends') or []
         forecast = context.get('deep_trend_forecast')
-        analysis = self.gap_analysis_fn(api_key, topic, papers, trend_stats, current_trends, forecast)
+        analysis = self.gap_analysis_fn(api_key, topic, papers, trend_stats, current_trends, forecast,
+                                        max_evidence_papers=context.get('deep_llm_evidence_papers'))
         analysis['research_gaps'] = self.validate_fn(analysis.get('research_gaps', []), papers, trend_stats)
         context['deep_trend_stats'] = trend_stats
         context['deep_analysis'] = analysis
@@ -234,3 +243,85 @@ class TrendGapDetectionAgent(BaseAgent):
                 f"addressed by dense, recent, cross-cited evidence and are penalized in "
                 f"ranking accordingly. Gaps are ranked by a priority_score that blends "
                 f"the LLM's confidence with that real evidence, not LLM confidence alone.")
+
+class PaperVerificationAgent(BaseAgent):
+    name = "paper_verification_agent"
+    description = ("Three-level paper verification between collection and analysis: "
+                   "Level 1 authenticity (persistent identifier -> DOI resolution at "
+                   "Crossref -> cross-source metadata agreement -> retraction status), "
+                   "Level 2 topical relevance, Level 3 quality (venue, publication type, "
+                   "metadata completeness, methodology evidence, author/affiliation). "
+                   "Keeps four separate scores per paper so every ranking decision is "
+                   "explainable, and rejects papers only on positive evidence of a "
+                   "problem — a contradicted record, an unresolvable DOI, a retraction, "
+                   "or a non-research publication type — never merely on absent data. "
+                   "No LLM judgement is used anywhere in this agent.")
+
+    def __init__(self, verify_fn):
+        self.verify_fn = verify_fn      # paper_verification.verify_papers
+
+    def execute(self, context):
+        papers = context.get('deep_papers', [])
+        result = self.verify_fn(
+            papers,
+            context.get('topic', ''),
+            keywords=context.get('keywords'),
+            research_question=context.get('research_question'),
+            idea_description=context.get('idea_description'),
+            network_top_n=context.get('verify_network_top_n'),
+        )
+        # Downstream stages (trend/gap detection, full-text analysis)
+        # should only ever see papers TRUSTED to shape the analysis —
+        # not merely papers that survived the reject gate. Passing
+        # verification (not REJECTED/RETRACTED/OFF_TOPIC) and being
+        # trustworthy enough to vote on a gap-analysis conclusion are
+        # different claims: an UNVERIFIED paper is kept and shown
+        # (deleting it would hide exactly the "we could not check
+        # this" case a reviewer most wants visible) but must not
+        # silently influence the ranking. paper_verification.
+        # filter_for_ranking() enforces that split; `context.get(
+        # 'ranking_statuses')` lets a caller widen/narrow the allowed
+        # tiers, and 'drop_unverified': false disables the gate
+        # entirely (kept papers of every non-rejected status feed
+        # ranking) for callers that explicitly want to inspect that.
+        import paper_verification as _pv
+        if context.get('drop_unverified', True):
+            ranking_eligible, excluded_from_ranking = _pv.filter_for_ranking(
+                result['kept'], statuses=context.get('ranking_statuses'))
+            context['deep_papers'] = ranking_eligible
+            context['deep_excluded_from_ranking'] = excluded_from_ranking
+        else:
+            context['deep_papers'] = result['kept']
+            context['deep_excluded_from_ranking'] = []
+        context['deep_verification'] = {k: v for k, v in result.items()
+                                        if k not in ('kept', 'rejected')}
+        context['deep_verification']['ranking_statuses'] = sorted(
+            context.get('ranking_statuses') or _pv.RANKING_STATUSES_DEFAULT)
+        context['deep_verification']['papers_used_for_ranking'] = len(context['deep_papers'])
+        context['deep_verification']['papers_kept_but_excluded_from_ranking'] = \
+            len(context['deep_excluded_from_ranking'])
+        context['deep_rejected_papers'] = result['rejected']
+        return result
+
+    def explain(self, context, data):
+        total = data.get('verified', 0)
+        kept = data.get('kept_count', 0)
+        rejected = data.get('rejected_count', 0)
+        counts = data.get('status_counts', {})
+        retracted = data.get('retracted_count', 0)
+        resolved = data.get('crossref_resolved', 0)
+        checked = data.get('crossref_checked', 0)
+        unresolved = data.get('crossref_unresolved', 0)
+        errors = data.get('crossref_errors', 0)
+        no_doi = data.get('papers_without_doi', 0)
+        oa = data.get('openalex_matched', 0)
+        breakdown = ', '.join(f"{k}: {v}" for k, v in sorted(counts.items()))
+        return (f"Verified {total} paper(s) on three independent levels. "
+                f"{resolved}/{checked} checked DOIs resolved at Crossref "
+                f"({unresolved} did not resolve, {errors} could not be checked because "
+                f"Crossref was unreachable — recorded as unchecked, not as failures); "
+                f"{oa} paper(s) were corroborated by an OpenAlex record; {no_doi} paper(s) "
+                f"carry no DOI at all and were scored on the checks that do apply to them "
+                f"rather than penalized for a field their source never publishes. "
+                f"{retracted} retraction(s) found. Verdicts — {breakdown}. "
+                f"{kept} paper(s) passed into gap analysis, {rejected} were held back.")

@@ -33,7 +33,7 @@ import requests
 import xml.etree.ElementTree as ET
 
 TIMEOUT = 15
-UA = {'User-Agent': 'ResearchLensAI/1.0 (mailto:research@example.com)'}
+UA = {'User-Agent': 'ResearchLensAI/1.0 (mailto:megham112004@gmail.com)'}
 
 
 def _clip(text, n=500):
@@ -63,7 +63,7 @@ def fetch_crossref(topic, max_results=30, offset=0):
     """
     try:
         url = "https://api.crossref.org/works"
-        params = {'query': topic, 'rows': min(max_results, 100), 'offset': max(0, offset), 'mailto': 'research@example.com'}
+        params = {'query': topic, 'rows': min(max_results, 100), 'offset': max(0, offset), 'mailto': 'megham112004@gmail.com'}
         resp = requests.get(url, params=params, timeout=TIMEOUT, headers=UA)
         resp.raise_for_status()
         items = resp.json().get('message', {}).get('items', [])
@@ -93,7 +93,16 @@ def fetch_crossref(topic, max_results=30, offset=0):
                 'venue': (it.get('container-title') or [''])[0],
                 'citation_count': it.get('is-referenced-by-count'),
                 'keywords_native': it.get('subject') or [],
+                # Real Crossref ISBN, when this record is a book/chapter —
+                # a genuine persistent identifier, never fabricated for a
+                # record Crossref didn't provide one for.
+                'isbn': (it.get('ISBN') or [''])[0],
             })
+        try:
+            from paper_quality import filter_credible
+            papers = filter_credible(papers)   # drop junk/test deposits
+        except ImportError:
+            pass
         return papers
     except Exception as e:
         print(f"Crossref fetch failed: {e}")
@@ -147,7 +156,16 @@ def fetch_pubmed(topic, max_results=30, offset=0):
                     name = f"{fore.text} {last.text}" if fore is not None else last.text
                     authors.append(name)
             doi_el = article.find(".//ArticleId[@IdType='doi']")
+            pmid_el = article.find(".//ArticleId[@IdType='pubmed']")
             journal_el = article.find('.//Journal/Title')
+            # PubMed's own <PublicationType> list — the authoritative
+            # per-record type vocabulary ("Journal Article", "Review",
+            # "Editorial", "Retracted Publication", "Comment", ...).
+            # paper_verification uses this for both publication-type
+            # classification and the retraction check, so it has to be
+            # read out of the record rather than inferred from the venue.
+            pub_types = [''.join(t.itertext()).strip()
+                         for t in article.findall('.//PublicationType')]
             papers.append({
                 'title': title,
                 'abstract': _clip(' '.join(abstract_parts)),
@@ -163,6 +181,8 @@ def fetch_pubmed(topic, max_results=30, offset=0):
                 # journal, simply because the journal name was never read
                 # out of PubMed's own response.
                 'venue': journal_el.text if journal_el is not None and journal_el.text else '',
+                'pmid': pmid_el.text if pmid_el is not None else '',
+                'publication_types_native': [t for t in pub_types if t],
             })
         return papers
     except Exception as e:
@@ -377,6 +397,10 @@ def fetch_inspire_hep(topic, max_results=30, page=1):
         papers = []
         for h in hits:
             meta = h.get('metadata', {})
+            # INSPIRE's own top-level literature-record ID (distinct from
+            # the metadata block) — a real persistent identifier for HEP
+            # records that may have no DOI at all (proceedings, reports).
+            inspire_id = str(h.get('id', '')) if h.get('id') is not None else ''
             titles = meta.get('titles') or []
             title = (titles[0].get('title', '') if titles else '').strip()
             if not title:
@@ -403,6 +427,7 @@ def fetch_inspire_hep(topic, max_results=30, page=1):
                 'venue': journal_title,
                 'citation_count': meta.get('citation_count'),
                 'keywords_native': keywords,
+                'inspire_id': inspire_id,
             })
         return papers
     except Exception as e:
@@ -669,61 +694,142 @@ DBLP_VENUE_STREAMS = {
 }
 
 
-def fetch_dblp_venue(topic, venue_name, max_results=30, first=0):
+# ─── DBLP venue search ───────────────────────────────────────────────
+# dblp.org's old search API now sits behind a bot-challenge (Anubis), so
+# this queries DBLP's official public SPARQL service instead, with the
+# old search API kept only as a last-resort fallback.
+
+DBLP_SPARQL_URL = "https://sparql.dblp.org/sparql"
+DBLP_LEGACY_SEARCH_URL = "https://dblp.org/search/publ/api"
+
+_DBLP_STOPWORDS = {
+    'a', 'an', 'the', 'of', 'for', 'and', 'or', 'in', 'on', 'to', 'with',
+    'using', 'based', 'via', 'by', 'from', 'at', 'is', 'are',
+}
+
+
+class DblpBlockedError(RuntimeError):
+    """DBLP answered with a bot-challenge page instead of data."""
+
+
+def _dblp_request_json(method, url, *, params=None, data=None,
+                       accept='application/json', max_attempts=3, timeout=30):
     """
-    Real, per-venue publication search via DBLP's public search API — no
-    key required. DBLP's query syntax supports a `streamid:<stream>:`
-    term that scopes results to one exact publication venue/series
-    (documented at https://dblp.org/faq/How+to+use+the+dblp+search+API.html),
-    so this is one real, honest call per checked venue — same pattern as
-    Crossref/PubMed/etc. above: query it, get back only what it actually
-    has for that venue, nothing layered or filtered after the fact.
-
-    This is what the Specific Venues checkboxes (AAAI/NeurIPS/ICML/ICLR)
-    actually call now — each checked venue is queried independently and
-    only papers DBLP itself lists under that venue's stream come back.
-    DBLP doesn't carry abstracts, so `abstract` is left as a placeholder
-    note rather than faked.
-
-    DBLP's public endpoint is unauthenticated and has a low tolerance for
-    bursts — a handful of requests arriving at once (e.g. several venues
-    checked together) can trip it into returning 429s and even 500s for
-    everything briefly, not just the request that crossed the limit. We
-    retry a few times with backoff on both 429 and 5xx before giving up,
-    and raise the real error rather than swallowing it, so the caller
-    sees why it failed instead of a silent [].
+    One DBLP HTTP call that returns parsed JSON, or raises with a message
+    that says what actually came back (never the bare JSON error).
+      * 429 / 5xx -> wait (honouring Retry-After) and retry
+      * bot-challenge HTML page -> DblpBlockedError immediately
+      * any other non-JSON body -> RuntimeError with status/type/snippet
     """
-    stream = DBLP_VENUE_STREAMS.get(venue_name)
-    if not stream:
-        return []
-    query = f"{topic} streamid:{stream}:"
-    url = "https://dblp.org/search/publ/api"
-    # DBLP's search API documents `f` (first hit index, 0-based) alongside
-    # `h` (how many) for pagination — used by deep_collection.py to page
-    # through a venue's results instead of only ever seeing the first
-    # `max_results` hits for that stream.
-    params = {'q': query, 'format': 'json', 'h': min(max_results, 100), 'f': max(0, first)}
-
-    max_attempts = 4
-    data = None
+    headers = dict(UA)
+    headers['Accept'] = accept
+    host = url.split('/')[2]
+    last = None
     for attempt in range(1, max_attempts + 1):
         try:
-            resp = requests.get(url, params=params, timeout=TIMEOUT, headers=UA)
-        except requests.exceptions.RequestException:
-            if attempt == max_attempts:
-                raise
-            time.sleep(2 ** attempt)
+            resp = requests.request(method, url, params=params, data=data,
+                                    headers=headers, timeout=timeout)
+        except requests.exceptions.RequestException as e:
+            last = RuntimeError(f"{host}: network error ({type(e).__name__}: {e})")
+            if attempt < max_attempts:
+                time.sleep(1.5 * (2 ** attempt))
             continue
-        if resp.status_code == 429 or resp.status_code >= 500:
-            if attempt == max_attempts:
-                resp.raise_for_status()
-            wait_s = float(resp.headers.get('Retry-After', 0)) or (1.5 * (2 ** attempt))
-            time.sleep(min(wait_s, 20))
-            continue
-        resp.raise_for_status()
-        data = resp.json()
-        break
 
+        if resp.status_code == 429 or resp.status_code >= 500:
+            last = RuntimeError(f"{host}: HTTP {resp.status_code}")
+            if attempt < max_attempts:
+                wait_s = float(resp.headers.get('Retry-After', 0) or 0) or (1.5 * (2 ** attempt))
+                time.sleep(min(wait_s, 20))
+            continue
+
+        try:
+            return resp.json()
+        except ValueError:
+            body = (resp.text or '').strip()
+            if 'not a bot' in body.lower() or 'anubis' in body.lower():
+                raise DblpBlockedError(
+                    f"{host} is serving a bot-challenge page (Anubis) instead of data")
+            ctype = resp.headers.get('Content-Type', '?')
+            snippet = body.replace('\n', ' ')[:120] or '<empty body>'
+            raise RuntimeError(
+                f"{host}: HTTP {resp.status_code} but not JSON (Content-Type={ctype}; body starts: {snippet!r})")
+    raise last or RuntimeError(f"{host}: request failed")
+
+
+def _dblp_topic_terms(topic):
+    words = re.findall(r"[a-z0-9]+", (topic or '').lower())
+    terms = [w for w in words if len(w) >= 2 and w not in _DBLP_STOPWORDS]
+    return (terms or words)[:6]
+
+
+def _dblp_sparql_query(stream, terms, limit, offset):
+    """
+    Papers in one DBLP stream whose title contains ALL topic terms
+    (same AND behaviour as DBLP's own search). Terms are only [a-z0-9],
+    so they are safe to embed. Terms of <=3 letters ("ai") must match a
+    whole word; longer terms match as a word prefix.
+    """
+    bs = "\\\\"  # two backslashes inside the SPARQL string = one regex backslash
+    filters = []
+    for t in terms:
+        pat = f"{bs}b{t}{bs}b" if len(t) <= 3 else f"{bs}b{t}"
+        filters.append(f'  FILTER(REGEX(STR(?title), "{pat}", "i"))')
+    return (
+        "PREFIX dblp: <https://dblp.org/rdf/schema#>\n"
+        "SELECT ?paper ?title ?year (SAMPLE(?doi_) AS ?doi)\n"
+        '       (GROUP_CONCAT(DISTINCT ?name; separator="|") AS ?authors) WHERE {\n'
+        f"  ?paper dblp:publishedInStream <https://dblp.org/streams/{stream}> .\n"
+        "  ?paper dblp:title ?title .\n"
+        "  ?paper dblp:yearOfPublication ?year .\n"
+        + "\n".join(filters) + "\n"
+        "  OPTIONAL { ?paper dblp:doi ?doi_ }\n"
+        "  OPTIONAL { ?paper dblp:authoredBy ?a . ?a dblp:primaryCreatorName ?name }\n"
+        "}\n"
+        "GROUP BY ?paper ?title ?year\n"
+        f"ORDER BY DESC(?year) ?title LIMIT {int(limit)} OFFSET {int(offset)}"
+    )
+
+
+def _dblp_paper(venue_name, title, year, authors, doi, key, venue=None):
+    return {
+        'title': title,
+        'abstract': 'No abstract available (DBLP does not provide abstracts).',
+        'year': str(year or 'N/A'),
+        'authors': authors[:3],
+        'categories': ['Academic Paper'],
+        'source': f'{venue_name} (via DBLP)',
+        'doi': doi or '',
+        'venue': venue or venue_name,
+        'dblp_key': key or '',
+    }
+
+
+def _dblp_via_sparql(topic, venue_name, stream, max_results, first):
+    q = _dblp_sparql_query(stream, _dblp_topic_terms(topic),
+                           min(max_results, 100), max(0, first))
+    data = _dblp_request_json('POST', DBLP_SPARQL_URL, data={'query': q},
+                              accept='application/sparql-results+json')
+    papers = []
+    for row in (data.get('results') or {}).get('bindings') or []:
+        val = lambda k: (row.get(k) or {}).get('value', '')
+        title = val('title').rstrip('.').strip()
+        if not title:
+            continue
+        doi = val('doi')
+        if doi.startswith('https://doi.org/'):
+            doi = doi[len('https://doi.org/'):]
+        authors = [a for a in val('authors').split('|') if a]
+        key = val('paper').replace('https://dblp.org/rec/', '')
+        papers.append(_dblp_paper(venue_name, title, val('year'), authors, doi, key))
+    return papers
+
+
+def _dblp_via_legacy_search(topic, venue_name, stream, max_results, first):
+    """Old search API. Only works if DBLP's bot challenge is off."""
+    params = {'q': f"{topic} streamid:{stream}:", 'format': 'json',
+              'h': min(max_results, 100), 'f': max(0, first)}
+    data = _dblp_request_json('GET', DBLP_LEGACY_SEARCH_URL, params=params,
+                              max_attempts=1, timeout=TIMEOUT)
     hits = ((data.get('result') or {}).get('hits') or {}).get('hit') or []
     papers = []
     for h in hits:
@@ -734,21 +840,30 @@ def fetch_dblp_venue(topic, venue_name, max_results=30, first=0):
         author_field = (info.get('authors') or {}).get('author', [])
         if isinstance(author_field, dict):
             author_field = [author_field]
-        authors = [
-            (a.get('text') if isinstance(a, dict) else a)
-            for a in author_field
-        ][:3]
-        papers.append({
-            'title': title,
-            'abstract': 'No abstract available (DBLP does not provide abstracts).',
-            'year': str(info.get('year') or 'N/A'),
-            'authors': authors,
-            'categories': ['Academic Paper'],
-            'source': f'{venue_name} (via DBLP)',
-            'doi': info.get('doi', ''),
-            'venue': info.get('venue', venue_name),
-        })
+        authors = [(a.get('text') if isinstance(a, dict) else a) for a in author_field]
+        papers.append(_dblp_paper(venue_name, title, info.get('year'), authors,
+                                  info.get('doi', ''), info.get('key', ''),
+                                  info.get('venue', venue_name)))
     return papers
+
+
+def fetch_dblp_venue(topic, venue_name, max_results=30, first=0):
+    """
+    Per-venue publication search via DBLP (no key). Tries DBLP's public
+    SPARQL service first; falls back to the legacy search API. If both
+    fail, raises RuntimeError that says why (e.g. bot-challenge page).
+    DBLP has no abstracts, so `abstract` is a placeholder, never faked.
+    """
+    stream = DBLP_VENUE_STREAMS.get(venue_name)
+    if not stream:
+        return []
+    errors = []
+    for label, fn in (('SPARQL', _dblp_via_sparql), ('search API', _dblp_via_legacy_search)):
+        try:
+            return fn(topic, venue_name, stream, max_results, first)
+        except Exception as e:
+            errors.append(f"{label}: {e}")
+    raise RuntimeError("DBLP unavailable — " + " | ".join(errors))
 
 
 # ─── Registry ───────────────────────────────────────────────────────

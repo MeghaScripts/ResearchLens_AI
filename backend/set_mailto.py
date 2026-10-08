@@ -1,0 +1,45 @@
+"""
+Replaces the placeholder contact email used for OpenAlex/Crossref requests
+with your real one (fixes 429 "Too Many Requests").
+
+Run from the folder that CONTAINS backend/ :
+    python set_mailto.py your_real_email@gmail.com
+Backups: <file>.mailto.bak
+"""
+import glob, os, re, shutil, sys
+
+if len(sys.argv) != 2 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", sys.argv[1]):
+    sys.exit("Usage: python set_mailto.py megham112004@gmail.com")
+email = sys.argv[1]
+
+here = os.getcwd()
+if not os.path.isdir("backend"):
+    sys.exit(f"No 'backend' folder in:\n  {here}\n"
+             "Open the terminal in the folder that contains backend\\ and frontend\\ "
+             "(the EXTRACTED project folder), then run this again.")
+
+files = [p for p in sorted(glob.glob("backend/**/*.py", recursive=True))
+         if os.sep + "tests" + os.sep not in p]
+print(f"Scanning {len(files)} .py files in {os.path.join(here, 'backend')}\n")
+
+# any placeholder-looking address: *@example.com / example.org / example.net / yourmail etc.
+pat = re.compile(rb"[A-Za-z0-9._%+-]+@(?:example\.(?:com|org|net)|domain\.com|email\.com|test\.com)")
+total = 0
+for p in files:
+    raw = open(p, "rb").read()
+    hits = pat.findall(raw)
+    if not hits:
+        continue
+    shutil.copyfile(p, p + ".mailto.bak")
+    open(p, "wb").write(pat.sub(email.encode(), raw))
+    print(f"OK  {p}  ({len(hits)} replaced: {sorted(set(h.decode() for h in hits))})")
+    total += len(hits)
+
+if total == 0:
+    print("No placeholder emails found. Here is every 'mailto' in your backend so we can see what it uses:\n")
+    for p in files:
+        for i, line in enumerate(open(p, "r", encoding="utf-8", errors="ignore"), 1):
+            if "mailto" in line.lower() or "CROSSREF_MAILTO" in line:
+                print(f"  {p}:{i}: {line.strip()[:140]}")
+else:
+    print(f"\nDone: {total} replacement(s). Restart Flask.")

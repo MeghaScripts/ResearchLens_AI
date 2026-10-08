@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Deep Research — ResearchLens AI</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/static/css/style.css"/>
+<style>
+  .dr-wrap{max-width:920px;margin:0 auto;padding:2rem}
+  .dr-topbar{display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:1.5rem;flex-wrap:wrap}
+  .dr-back{font-size:0.82rem;color:var(--text2);text-decoration:none;font-weight:600}
+  .dr-back:hover{color:var(--cyan)}
+  .dr-header h1{font-family:var(--font-display);font-size:1.9rem}
+  .dr-header p{color:var(--text2);font-size:0.9rem;margin-top:0.5rem;max-width:70ch;line-height:1.65}
+  .dr-card{background:var(--glass);border:1px solid var(--border);border-radius:var(--radius-lg);padding:1.75rem;margin-top:1.5rem}
+  .dr-row{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+  @media(max-width:640px){.dr-row{grid-template-columns:1fr}}
+  .dr-hint{font-size:0.72rem;color:var(--text3);margin-top:0.4rem;line-height:1.5}
+  textarea.field-input{resize:vertical;min-height:70px;font-family:var(--font-main)}
+  details.dr-adv{margin-top:1.5rem;border-top:1px solid var(--border);padding-top:1.1rem}
+  details.dr-adv summary{cursor:pointer;font-weight:600;font-size:0.88rem;color:var(--cyan);list-style:none;display:flex;align-items:center;gap:0.4rem}
+  details.dr-adv summary::-webkit-details-marker{display:none}
+  details.dr-adv summary::before{content:'▸';transition:transform 0.15s}
+  details.dr-adv[open] summary::before{transform:rotate(90deg)}
+  .dr-adv-body{margin-top:1.1rem;display:flex;flex-direction:column;gap:1.1rem}
+  .dr-toggle{display:flex;align-items:flex-start;gap:0.65rem;padding:0.7rem 0.85rem;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:10px}
+  .dr-toggle input{margin-top:0.2rem;accent-color:var(--cyan);width:16px;height:16px;flex-shrink:0}
+  .dr-toggle .tt{font-size:0.86rem;font-weight:600;color:var(--text)}
+  .dr-toggle .ts{font-size:0.74rem;color:var(--text3);margin-top:0.15rem;line-height:1.5}
+  .dr-submit-note{font-size:0.75rem;color:var(--text3);margin-top:0.9rem;text-align:center;line-height:1.5}
+  .dr-error{margin-top:1.25rem;padding:1rem 1.2rem;border-radius:10px;background:rgba(255,71,87,0.08);border:1px solid rgba(255,71,87,0.3);color:#ffb3ba;font-size:0.85rem;line-height:1.6;display:none}
+  .dr-error.show{display:block}
+  .dr-error ul{margin:0.5rem 0 0;padding-left:1.1rem}
+  .dr-results{display:none;margin-top:1.5rem}
+  .dr-results.show{display:block}
+  .dr-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.75rem;margin-top:1rem}
+  .dr-stat{background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;padding:0.75rem 0.9rem}
+  .dr-stat .k{font-size:0.65rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--text3)}
+  .dr-stat .v{font-family:var(--font-mono,var(--font-main));font-size:1.3rem;font-weight:600;margin-top:0.2rem}
+  .dr-stat .s{font-size:0.68rem;color:var(--text3);margin-top:0.15rem}
+  .dr-chips{display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.9rem}
+  .dr-chip{font-size:0.7rem;padding:0.25rem 0.6rem;border-radius:20px;background:var(--glass2);border:1px solid var(--border);color:var(--text2)}
+  .dr-cta{display:inline-flex;align-items:center;gap:0.5rem;margin-top:1.1rem;padding:0.7rem 1.2rem;border-radius:10px;
+          background:linear-gradient(135deg,var(--cyan),var(--purple));color:#fff;text-decoration:none;font-weight:700;font-size:0.85rem}
+  .dr-gap{border:1px solid var(--border);border-radius:12px;padding:0.9rem 1rem;margin-top:0.7rem;background:rgba(255,255,255,0.02)}
+  .dr-gap h4{font-size:0.92rem;margin:0 0 0.35rem}
+  .dr-gap p{font-size:0.8rem;color:var(--text2);line-height:1.6;margin:0}
+  .dr-gap .dr-chips{margin-top:0.55rem}
+  .dr-sub{font-family:var(--font-display);font-size:1.05rem;margin:1.6rem 0 0.2rem}
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+<div class="orb orb1"></div>
+<div class="orb orb2"></div>
+<div class="orb orb3"></div>
+
+<div class="dr-wrap">
+  <div class="dr-topbar">
+    <a class="dr-back" href="/index.html">← Dashboard</a>
+    <a class="dr-back" href="/verify">🛡 View Verification Reports →</a>
+  </div>
+
+  <div class="dr-header">
+    <h1>Deep Research</h1>
+    <p>Runs the full multi-source collection + three-level verification pipeline: pages every relevant academic
+       source to near-exhaustion, backfills real citation counts, scores impact, verifies every paper's
+       authenticity / relevance / quality before it's allowed to vote on anything, then detects trend-grounded
+       research gaps. This is the run that populates <a href="/verify" style="color:var(--cyan)">Paper
+       Verification</a> — nothing appears there until a run finishes here.</p>
+  </div>
+
+  <form id="drForm">
+    <div class="dr-card">
+      <div class="dr-row">
+        <div>
+          <label class="field-label">Groq API Key</label>
+          <div style="position:relative">
+            <input type="password" id="drApiKey" class="field-input" placeholder="gsk_••••••••••••••••••••••" required/>
+            <button type="button" onclick="toggleDrKey()" style="position:absolute;right:0.9rem;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text3);cursor:pointer;font-size:0.85rem">show</button>
+          </div>
+        </div>
+        <div>
+          <label class="field-label">Research Topic</label>
+          <input type="text" id="drTopic" class="field-input" placeholder="e.g. Vision transformers for IoT intrusion detection" required/>
+        </div>
+      </div>
+
+      <div style="margin-top:1rem">
+        <label class="field-label">Idea description <span style="color:var(--text3);font-weight:400">(optional — sharpens relevance scoring)</span></label>
+        <textarea id="drIdea" class="field-input" placeholder="A sentence or two describing the specific angle you care about, if the topic alone is broad."></textarea>
+      </div>
+
+      <details class="dr-adv">
+        <summary>Advanced options</summary>
+        <div class="dr-adv-body">
+          <div class="dr-row">
+            <div>
+              <label class="field-label">Domain</label>
+              <input type="text" id="drDomain" class="field-input" placeholder="e.g. Computer Science"/>
+            </div>
+            <div>
+              <label class="field-label">Sub-domain</label>
+              <input type="text" id="drSubDomain" class="field-input" placeholder="e.g. Cybersecurity"/>
+            </div>
+          </div>
+          <div>
+            <label class="field-label">Keywords <span style="color:var(--text3);font-weight:400">(comma-separated)</span></label>
+            <input type="text" id="drKeywords" class="field-input" placeholder="e.g. IoT, intrusion detection, vision transformer"/>
+          </div>
+          <div>
+            <label class="field-label">Research question</label>
+            <input type="text" id="drQuestion" class="field-input" placeholder="e.g. Can ViTs outperform CNN/LSTM baselines on IoT traffic?"/>
+          </div>
+          <div class="dr-row">
+            <div>
+              <label class="field-label">Paper sources <span style="color:var(--text3);font-weight:400">(optional override)</span></label>
+              <input type="text" id="drSources" class="field-input" placeholder="leave blank = auto-select by domain"/>
+              <div class="dr-hint">Comma-separated. Valid: ArXiv, Semantic Scholar, OpenAlex, Crossref, DOAJ,
+                Internet Archive, IEEE Xplore, Springer Nature, ScienceDirect, CORE, PubMed, Europe PMC, ERIC,
+                INSPIRE-HEP, NASA ADS.</div>
+            </div>
+            <div>
+              <label class="field-label">Strict venue filter <span style="color:var(--text3);font-weight:400">(optional)</span></label>
+              <input type="text" id="drVenues" class="field-input" placeholder="e.g. NeurIPS, ICML"/>
+              <div class="dr-hint">Comma-separated. Valid: AAAI, NeurIPS, ICML, ICLR. Adds a dedicated DBLP-backed
+                pull for each, on top of the general sources above.</div>
+            </div>
+          </div>
+
+          <div class="dr-toggle">
+            <input type="checkbox" id="drExpand" checked/>
+            <div><div class="tt">Expand queries with the LLM first</div>
+              <div class="ts">Widens recall beyond the literal topic string before collection starts.</div></div>
+          </div>
+          <div class="dr-toggle">
+            <input type="checkbox" id="drVerify" checked/>
+            <div><div class="tt">Run three-level paper verification</div>
+              <div class="ts">Authenticity → relevance → quality, with real registry checks. This is what
+                populates the Paper Verification page — turning it off means this run won't appear there.</div></div>
+          </div>
+          <div class="dr-toggle">
+            <input type="checkbox" id="drDropUnverified" checked/>
+            <div><div class="tt">Exclude unverified papers from gap analysis</div>
+              <div class="ts">Only used when verification is on. Kept papers that couldn't be corroborated still
+                appear in the verification report — they just don't vote on ranking or gaps.</div></div>
+          </div>
+          <div class="dr-toggle">
+            <input type="checkbox" id="drTrends"/>
+            <div><div class="tt">Include live current-trends search</div>
+              <div class="ts">Needs TAVILY_API_KEY or SERPER_API_KEY configured on the server. Off by default.</div></div>
+          </div>
+          <div class="dr-toggle">
+            <input type="checkbox" id="drFullText"/>
+            <div><div class="tt">Include full-text analysis</div>
+              <div class="ts">Extracts methodology/dataset/limitations from real full text where available.
+                Slower — adds a per-paper fetch pass.</div></div>
+          </div>
+
+          <div class="dr-row">
+            <div>
+              <label class="field-label">Verification network cap</label>
+              <input type="number" id="drVerifyTopN" class="field-input" placeholder="default: 100" min="1"/>
+              <div class="dr-hint">Bounds per-paper Crossref round trips to the top N by impact rank.</div>
+            </div>
+            <div>
+              <label class="field-label">Full-text analysis cap</label>
+              <input type="number" id="drFullTextTopN" class="field-input" placeholder="default: all collected papers" min="1"/>
+              <div class="dr-hint">Only applies if full-text analysis is enabled above.</div>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <button type="submit" class="analyze-btn" id="drBtn" style="margin-top:1.5rem">
+        <span class="btn-content"><span class="btn-icon">🔬</span><span class="btn-text">Run Deep Research Analysis</span></span>
+        <div class="btn-glow"></div>
+      </button>
+      <div class="dr-submit-note">This can take several minutes — multiple sources are paged to
+        near-exhaustion, then every collected paper is verified before gap detection runs.</div>
+    </div>
+  </form>
+
+  <div class="dr-error" id="drError"></div>
+
+  <div class="dr-results" id="drResults"></div>
+</div>
+
+<div class="loading-overlay" id="drLoadingOverlay" style="display:none">
+  <div class="loading-card">
+    <div class="loading-orb"></div>
+    <div class="loading-title">Running the deep research pipeline…</div>
+    <div class="loading-steps" id="drSteps"></div>
+    <div class="loading-bar-wrap"><div class="loading-bar" id="drLoadingBar"></div></div>
+    <div style="font-size:0.72rem;color:var(--text3);margin-top:0.9rem;font-family:var(--font-mono,var(--font-main))" id="drElapsed">0s elapsed</div>
+  </div>
+</div>
+
+<script type="module">
+  import '/static/js/firebase-auth.js';
+  await window.rlAuth.requireAuth();
+</script>
+<script>
+const STAGES = [
+  '🧭 Expanding search queries',
+  '📡 Collecting papers across sources',
+  '🔗 Backfilling citation counts',
+  '📊 Scoring impact & ranking',
+  '🛡️ Verifying authenticity, relevance & quality',
+  '📈 Forecasting trends',
+  '🧠 Detecting research gaps',
+  '📄 Compiling results',
+];
+
+function toggleDrKey() {
+  const f = document.getElementById('drApiKey');
+  const btn = event.target;
+  f.type = f.type === 'password' ? 'text' : 'password';
+  btn.textContent = f.type === 'password' ? 'show' : 'hide';
+}
+window.toggleDrKey = toggleDrKey;
+
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const csv = v => v ? v.split(',').map(s => s.trim()).filter(Boolean) : null;
+
+let stageTimer = null, elapsedTimer = null, elapsedSec = 0;
+function startLoading() {
+  document.getElementById('drLoadingOverlay').style.display = 'flex';
+  document.getElementById('drBtn').disabled = true;
+  const stepsEl = document.getElementById('drSteps');
+  stepsEl.innerHTML = STAGES.map((s, i) => `<div class="lstep" id="dls${i}">${esc(s)}</div>`).join('');
+  const bar = document.getElementById('drLoadingBar');
+  bar.style.width = '0%';
+  elapsedSec = 0;
+  document.getElementById('drElapsed').textContent = '0s elapsed';
+  let i = 0;
+  stageTimer = setInterval(() => {
+    if (i > 0) document.getElementById('dls' + (i - 1)).classList.replace('active', 'done');
+    if (i < STAGES.length) {
+      document.getElementById('dls' + i).classList.add('active');
+      bar.style.width = `${((i + 1) / STAGES.length * 100)}%`;
+      i++;
+    } else {
+      // Real pipeline is still running (this is a long single request with
+      // no server-sent progress) — hold on the last stage, pulsing, rather
+      // than falsely claim completion while still waiting on the fetch.
+      clearInterval(stageTimer);
+    }
+  }, 3500);
+  elapsedTimer = setInterval(() => {
+    elapsedSec++;
+    document.getElementById('drElapsed').textContent = `${elapsedSec}s elapsed`;
+  }, 1000);
+}
+function stopLoading() {
+  document.getElementById('drLoadingOverlay').style.display = 'none';
+  document.getElementById('drBtn').disabled = false;
+  if (stageTimer) clearInterval(stageTimer);
+  if (elapsedTimer) clearInterval(elapsedTimer);
+}
+
+function showError(msg, extra) {
+  const el = document.getElementById('drError');
+  let html = esc(msg);
+  if (extra && extra.length) {
+    html += '<ul>' + extra.map(r => `<li>${esc(r)}</li>`).join('') + '</ul>';
+  }
+  el.innerHTML = html;
+  el.classList.add('show');
+}
+function clearError() {
+  const el = document.getElementById('drError');
+  el.classList.remove('show');
+  el.innerHTML = '';
+}
+
+function renderResults(data) {
+  const ps = data.pipeline_stats || {};
+  const ver = data.verification || {};
+  const statusChips = Object.entries(ps.status_counts || {})
+    .map(([k, n]) => `<span class="dr-chip">${esc(k.replace(/_/g, ' ').toLowerCase())} · ${n}</span>`).join('');
+  const gaps = (data.analysis && data.analysis.research_gaps) || [];
+
+  const gapHtml = gaps.slice(0, 6).map(g => {
+    const v = g.validation || {};
+    return `<div class="dr-gap">
+      <h4>${esc(g.gap_title || 'Untitled gap')}</h4>
+      <p>${esc(g.description || '')}</p>
+      <div class="dr-chips">
+        ${v.is_recently_active ? '<span class="dr-chip">recent corpus evidence</span>' : ''}
+        ${v.appears_already_addressed ? '<span class="dr-chip">looks already addressed</span>' : ''}
+        ${g.near_term_prediction ? `<span class="dr-chip">${esc(g.near_term_prediction).slice(0, 80)}</span>` : ''}
+      </div>
+    </div>`;
+  }).join('') || '<p style="color:var(--text3);font-size:0.85rem">No research gaps were returned for this run.</p>';
+
+  document.getElementById('drResults').innerHTML = `
+    <div class="dr-card">
+      <h3 style="font-family:var(--font-display)">✅ ${esc(data.topic)}</h3>
+      <div class="dr-stats">
+        <div class="dr-stat"><div class="k">Discovered</div><div class="v">${ps.papers_discovered ?? '—'}</div>
+          <div class="s">across all selected sources</div></div>
+        <div class="dr-stat"><div class="k">Shortlisted</div><div class="v">${ps.after_cross_source_dedup_and_shortlisting ?? '—'}</div>
+          <div class="s">after dedup + ranking</div></div>
+        <div class="dr-stat"><div class="k">Verified</div><div class="v">${ps.verified_total ?? '—'}</div>
+          <div class="s">${ps.used_for_ranking_and_gap_analysis ?? '—'} used for ranking</div></div>
+        <div class="dr-stat"><div class="k">Rejected</div><div class="v">${ps.rejected_count ?? 0}</div>
+          <div class="s">${ps.retracted_count ?? 0} retracted</div></div>
+      </div>
+      <div class="dr-chips">${statusChips}</div>
+      ${ver.persisted ? `<a class="dr-cta" href="/verify">🛡 View full verification report →</a>`
+        : ver.ran === false ? `<div class="dr-hint" style="margin-top:1rem">Verification did not run for this
+            request${ver.reason ? ' (' + esc(ver.reason) + ')' : ''}, so nothing was added to Paper Verification.</div>`
+        : `<div class="dr-hint" style="margin-top:1rem">Verification ran but the run could not be saved
+            (${esc(ver.persist_error || 'unknown error')}) — the scores above are from this response only.</div>`}
+    </div>
+
+    <div class="dr-card">
+      <h3 class="dr-sub" style="margin-top:0">Research gaps</h3>
+      ${gapHtml}
+    </div>
+  `;
+  document.getElementById('drResults').classList.add('show');
+}
+
+document.getElementById('drForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  clearError();
+  document.getElementById('drResults').classList.remove('show');
+
+  const apiKey = document.getElementById('drApiKey').value.trim();
+  const topic = document.getElementById('drTopic').value.trim();
+  if (!apiKey || !topic) { showError('Please fill in your Groq API key and a research topic.'); return; }
+
+  const body = {
+    api_key: apiKey, topic,
+    idea_description: document.getElementById('drIdea').value.trim() || undefined,
+    domain: document.getElementById('drDomain').value.trim() || undefined,
+    sub_domain: document.getElementById('drSubDomain').value.trim() || undefined,
+    keywords: csv(document.getElementById('drKeywords').value.trim()),
+    research_question: document.getElementById('drQuestion').value.trim() || undefined,
+    paper_sources: csv(document.getElementById('drSources').value.trim()),
+    venue_filter: csv(document.getElementById('drVenues').value.trim()),
+    expand_queries: document.getElementById('drExpand').checked,
+    verify_papers: document.getElementById('drVerify').checked,
+    drop_unverified: document.getElementById('drDropUnverified').checked,
+    include_current_trends: document.getElementById('drTrends').checked,
+    include_full_text_analysis: document.getElementById('drFullText').checked,
+  };
+  const vtn = document.getElementById('drVerifyTopN').value.trim();
+  if (vtn) body.verify_network_top_n = Number(vtn);
+  const ftn = document.getElementById('drFullTextTopN').value.trim();
+  if (ftn) body.full_text_top_n = Number(ftn);
+
+  startLoading();
+  try {
+    const resp = await fetch('/api/deep-research', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    stopLoading();
+    if (!resp.ok) {
+      const extra = (data.rejected_sample || []).slice(0, 8)
+        .map(p => `${p.title || 'Untitled'} — ${(p.verification_reasons || []).join('; ') || p.verification_status || 'no reason recorded'}`);
+      showError(data.error || `Request failed (${resp.status}).`, extra);
+      return;
+    }
+    renderResults(data);
+  } catch (err) {
+    stopLoading();
+    showError('Connection error. Make sure the backend is running.');
+    console.error(err);
+  }
+});
+</script>
+</body>
+</html>

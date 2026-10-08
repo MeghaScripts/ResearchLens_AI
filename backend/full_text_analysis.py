@@ -43,13 +43,66 @@ import re
 import io
 import json
 import requests
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from groq import Groq
 
 TIMEOUT = 30
 FULLTEXT_TOP_N_DEFAULT = None  # None = every paper passed in (flowchart stage 12)
-MAX_TEXT_CHARS = 12000  # how much of a paper's full text is sent to the LLM per call
-MAX_WORKERS = int(os.environ.get('DEEP_ANALYSIS_MAX_WORKERS', '8'))
+
+# ── Groq tokens-per-minute limiter ───────────────────────────────────
+# The on_demand tier caps openai/gpt-oss-120b at ~8000 tokens/minute for
+# the whole organization. Eight parallel ~4k-token requests blow through
+# that instantly and every call 429s. This reserves an estimated token
+# cost against a rolling 60s window before each call (so threads queue
+# instead of failing) and retries a real 429 after the wait Groq asks for.
+GROQ_TPM_BUDGET = int(os.environ.get('GROQ_TPM_BUDGET', '7000'))
+ANALYSIS_BUDGET_S = float(os.environ.get('DEEP_FULLTEXT_BUDGET_S', '150'))
+_tpm_lock = threading.Lock()
+_tpm_window = []  # [(timestamp, tokens)]
+_no_reasoning_effort = False
+
+
+def _reserve_tokens(tokens):
+    tokens = min(tokens, GROQ_TPM_BUDGET)
+    while True:
+        with _tpm_lock:
+            now = time.time()
+            _tpm_window[:] = [(t, n) for t, n in _tpm_window if now - t < 60]
+            used = sum(n for _, n in _tpm_window)
+            if used + tokens <= GROQ_TPM_BUDGET:
+                _tpm_window.append((now, tokens))
+                return
+            wait = 60 - (now - _tpm_window[0][0]) + 0.2
+        time.sleep(max(0.3, min(wait, 5.0)))
+
+
+def _groq_chat(client, prompt, max_tokens, groq_model, retries=3):
+    est = len(prompt) // 3 + max_tokens
+    for attempt in range(retries + 1):
+        _reserve_tokens(est)
+        try:
+            kwargs = dict(model=groq_model, messages=[{"role": "user", "content": prompt}],
+                          temperature=0.2, max_tokens=max_tokens)
+            if 'gpt-oss' in (groq_model or '') and not _no_reasoning_effort:
+                # gpt-oss spends part of max_tokens on hidden reasoning, which
+                # truncated the JSON ("Unterminated string"); keep it short.
+                kwargs['extra_body'] = {'reasoning_effort': 'low'}
+            return client.chat.completions.create(**kwargs)
+        except Exception as e:
+            msg = str(e)
+            if 'reasoning_effort' in msg or ('400' in msg and 'extra_body' in kwargs):
+                globals()['_no_reasoning_effort'] = True
+                continue
+            if attempt == retries or ('429' not in msg and 'rate_limit' not in msg):
+                raise
+            m = re.search(r'try again in (\d+(?:\.\d+)?)\s*(ms|s)', msg)
+            wait = (float(m.group(1)) / (1000 if m.group(2) == 'ms' else 1)) if m else 15.0
+            time.sleep(min(45.0, wait + 1.0))
+
+MAX_TEXT_CHARS = int(os.environ.get('DEEP_FULLTEXT_CHARS', '6000'))  # how much of a paper's full text is sent to the LLM per call
+MAX_WORKERS = int(os.environ.get('DEEP_ANALYSIS_MAX_WORKERS', '3'))
 
 
 def _fetch_arxiv_pdf_text(arxiv_id):
@@ -136,11 +189,7 @@ Respond with pure JSON, no markdown:
   "limitations": "...",
   "future_work": "..."
 }}"""
-    response = client.chat.completions.create(
-        model=groq_model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2, max_tokens=1200,
-    )
+    response = _groq_chat(client, prompt, 1400, groq_model)
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r'^```[a-z]*\n?', '', raw)
     raw = re.sub(r'\n?```$', '', raw)
@@ -180,11 +229,7 @@ Respond with pure JSON, no markdown:
   "limitations": "...",
   "future_work": "..."
 }}"""
-    response = client.chat.completions.create(
-        model=groq_model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2, max_tokens=800,
-    )
+    response = _groq_chat(client, prompt, 1100, groq_model)
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r'^```[a-z]*\n?', '', raw)
     raw = re.sub(r'\n?```$', '', raw)
@@ -241,8 +286,17 @@ def deep_analyze_top_papers(api_key, papers, groq_model, top_n=FULLTEXT_TOP_N_DE
     full_text_count = 0
     abstract_count = 0
 
+    deadline = time.time() + ANALYSIS_BUDGET_S
+
+    def _run(paper):
+        # Past the time budget, skip the (rate-limited) LLM call rather than
+        # make the whole request wait minutes; the paper is just left unanalyzed.
+        if time.time() > deadline:
+            return paper, {'full_text_available': False, 'extraction_basis': None}, False
+        return _analyze_one(api_key, paper, groq_model)
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {pool.submit(_analyze_one, api_key, paper, groq_model): paper for paper in target}
+        futures = {pool.submit(_run, paper): paper for paper in target}
         for future in as_completed(futures):
             paper, extracted, was_full_text = future.result()
             paper['deep_analysis'] = extracted

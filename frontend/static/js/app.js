@@ -253,7 +253,7 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
   const venueFilter = venueFilterEl ? venueFilterEl.value.trim() : '';
 
   showLoading(true);
-  animateLoadingSteps();
+  resetLiveProgress();
 
   try {
     let data;
@@ -267,9 +267,10 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
       if (paperSources) formData.append('paper_sources', paperSources);
       if (venueFilter) formData.append('venue_filter', venueFilter);
       if (pdfInput.files[0]) formData.append('pdf', pdfInput.files[0]);
-      const resp = await fetch('/api/analyze', { method: 'POST', body: formData });
-      data = await resp.json();
-      if (!resp.ok) { showLoading(false); showArxivOrGenericError(resp.status, data); return; }
+      const startResp = await fetch('/api/analyze/start', { method: 'POST', body: formData });
+      const startData = await startResp.json();
+      if (!startResp.ok) { showLoading(false); showArxivOrGenericError(startResp.status, startData); return; }
+      data = await pollAnalyzeJob(startData.job_id);
     } else {
       const formData = new FormData();
       formData.append('api_key', apiKey);
@@ -289,31 +290,102 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
     renderResults(data);
   } catch (err) {
     showLoading(false);
-    alert('Connection error. Make sure the backend is running on port 5000.');
-    console.error(err);
+    if (err && err.pipelineError) {
+      showArxivOrGenericError(err.status || 500, err.payload || { error: err.message });
+    } else {
+      alert('Connection error. Make sure the backend is running on port 5000.');
+      console.error(err);
+    }
   }
 });
 
-// ── Loading ─────────────────────────────────────────────────────────
+// ── Loading: live progress (real papers + real agent steps) ──────────
 let loadingTimer = null;
-function animateLoadingSteps() {
-  const steps = ['ls1','ls2','ls3','ls4','ls5'];
-  const bar = document.getElementById('loadingBar');
-  let i = 0;
-  steps.forEach(s => { document.getElementById(s).className = 'lstep'; });
-  bar.style.width = '0%';
-  loadingTimer = setInterval(() => {
-    if (i > 0) document.getElementById(steps[i-1]).classList.replace('active','done');
-    if (i < steps.length) { document.getElementById(steps[i]).classList.add('active'); bar.style.width = `${((i+1)/steps.length*100)}%`; i++; }
-    else clearInterval(loadingTimer);
-  }, 900);
+
+function resetLiveProgress() {
+  document.getElementById('livePapersBox').style.display = 'none';
+  document.getElementById('livePapersHeader').textContent = '';
+  document.getElementById('livePapersList').innerHTML = '';
+  document.getElementById('liveStepsList').innerHTML =
+    '<div class="lstep active" id="lstepPlaceholder">🚀 Starting analysis…</div>';
+  document.getElementById('loadingBar').style.width = '4%';
+}
+
+const AGENT_ICONS = {
+  pdf_agent: '📄', search_agent: '📡', keyword_agent: '🧩', metadata_agent: '🗂️',
+  domain_classification_agent: '🏷️', gap_detection_agent: '🤖',
+  knowledge_graph_agent: '🕸️', trend_agent: '📈', embedding_agent: '🧠',
+  validation_agent: '✅', report_agent: '📋',
+};
+// Rough total so the bar reads as progress, not a countdown promising a
+// specific finish time — every run has a similar-length pipeline even
+// though each stage's actual duration varies a lot (search vs. Groq call).
+const EXPECTED_STEP_COUNT = 10;
+
+function renderLiveSteps(steps) {
+  const list = document.getElementById('liveStepsList');
+  if (!steps.length) return;
+  list.innerHTML = steps.map((s, i) => {
+    const icon = AGENT_ICONS[s.agent] || (s.success ? '✔️' : '⚠️');
+    const cls = i === steps.length - 1 ? 'lstep active' : 'lstep done';
+    const text = s.summary || `${s.agent} ${s.success ? 'completed' : 'failed'}`;
+    return `<div class="${cls}">${icon} ${esc(text)}</div>`;
+  }).join('');
+  document.getElementById('loadingBar').style.width =
+    `${Math.min(96, Math.round((steps.length / EXPECTED_STEP_COUNT) * 100))}%`;
+}
+
+function renderLivePapers(count, sample) {
+  if (!count) return;
+  const box = document.getElementById('livePapersBox');
+  box.style.display = 'block';
+  document.getElementById('livePapersHeader').textContent =
+    `📚 Found ${count} papers — analyzing these:`;
+  document.getElementById('livePapersList').innerHTML = sample.map(p =>
+    `<div>• ${esc(p.title)} <span style="opacity:0.6">(${esc(p.source || 'unknown source')}${p.year ? ', ' + p.year : ''})</span></div>`
+  ).join('') + (count > sample.length ? `<div style="opacity:0.6;margin-top:0.2rem">…and ${count - sample.length} more</div>` : '');
+}
+
+
+
+/** Polls /api/analyze/status/<job_id> until the job finishes, updating the
+ * live steps/papers panels on every poll. Resolves with the final result
+ * payload (identical shape to what /api/analyze used to return directly),
+ * or throws {pipelineError:true, status, payload} on failure — callers
+ * catch and route that through the exact same error UI as before. */
+function pollAnalyzeJob(jobId) {
+  return new Promise((resolve, reject) => {
+    const poll = async () => {
+      try {
+        const resp = await fetch(`/api/analyze/status/${jobId}`);
+        const job = await resp.json();
+        if (!resp.ok) {
+          reject({ pipelineError: true, status: resp.status, payload: job });
+          return;
+        }
+        renderLiveSteps(job.steps || []);
+        renderLivePapers(job.papers_count, job.papers_sample || []);
+        if (job.status === 'done') {
+          resolve(job.result);
+        } else if (job.status === 'error') {
+          reject({ pipelineError: true, status: 500, payload: { error: job.error || 'Analysis failed' } });
+        } else {
+          loadingTimer = setTimeout(poll, 1200);
+        }
+      } catch (err) {
+        reject(err);
+      }
+    };
+    poll();
+  });
 }
 
 function showLoading(show) {
   document.getElementById('loadingOverlay').style.display = show ? 'flex' : 'none';
   document.getElementById('analyzeBtn').disabled = show;
-  if (!show && loadingTimer) clearInterval(loadingTimer);
+  if (!show && loadingTimer) { clearTimeout(loadingTimer); loadingTimer = null; }
 }
+
 
 // ── Render Results ───────────────────────────────────────────────────
 function renderResults(data) {
@@ -356,8 +428,31 @@ function renderResults(data) {
     renderPaperSummaries(analysis.paper_summaries||[], analysis.comparative_analysis||[]);
   }
 
-  document.getElementById('downloadBtn').onclick = () => {
-    window.open(`/api/download/${report_filename}`, '_blank');
+  document.getElementById('downloadBtn').onclick = async () => {
+    // window.open() can't send the Authorization header, so the backend
+    // rejected it. fetch() is patched by firebase-auth.js to add the token.
+    const btn = document.getElementById('downloadBtn');
+    const original = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner"></span>Downloading...';
+    btn.disabled = true;
+    try {
+      const resp = await fetch(`/api/download/${encodeURIComponent(report_filename)}`);
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error || 'Download failed');
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = report_filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      alert('Error downloading report: ' + e.message);
+    } finally {
+      btn.innerHTML = original;
+      btn.disabled = false;
+    }
   };
 
   const bibtexBtn = document.getElementById('bibtexBtn');
@@ -2418,6 +2513,11 @@ window.closeEvalModal = () => {
   document.getElementById('evalModal').classList.remove('open');
 };
 
+// Show "n/a" instead of "—%" when there is no data for a rate.
+function fmtPct(v) {
+  return (v === null || v === undefined || Number.isNaN(v)) ? 'n/a' : `${v}%`;
+}
+
 async function loadEvalDashboard() {
   const el = document.getElementById('evalDashboardContent');
   el.innerHTML = 'Loading...';
@@ -2430,17 +2530,17 @@ async function loadEvalDashboard() {
       return;
     }
     const sevRows = Object.entries(d.by_severity || {}).map(([sev, s]) =>
-      `<div class="tt-meta-item">${esc(sev)}: ${s.valid_rate}% valid (n=${s.total})</div>`).join('');
+      `<div class="tt-meta-item">${esc(sev)}: ${fmtPct(s.valid_rate)} valid (n=${s.total})</div>`).join('');
     const confRows = Object.entries(d.confidence_calibration || {}).map(([bucket, s]) =>
       `<div style="padding:0.4rem 0;border-bottom:1px solid var(--border);font-size:0.82rem">
-        <b>${esc(bucket)}</b>: ${s.valid_rate}% actually valid (n=${s.total})
+        <b>${esc(bucket)}</b>: ${fmtPct(s.valid_rate)} actually valid (n=${s.total})
       </div>`).join('');
 
     el.innerHTML = `
       <div class="profile-stats" style="margin-bottom:1rem">
         <div class="profile-stat"><div class="profile-stat-num">${d.total_ratings}</div><div class="profile-stat-label">Total ratings</div></div>
-        <div class="profile-stat"><div class="profile-stat-num">${d.overall_valid_rate}%</div><div class="profile-stat-label">Valid rate</div></div>
-        <div class="profile-stat"><div class="profile-stat-num">${d.evidence_verified_valid_rate ?? '—'}%</div><div class="profile-stat-label">Verified-quote valid rate</div></div>
+        <div class="profile-stat"><div class="profile-stat-num">${fmtPct(d.overall_valid_rate)}</div><div class="profile-stat-label">Valid rate</div></div>
+        <div class="profile-stat"><div class="profile-stat-num">${fmtPct(d.evidence_verified_valid_rate)}</div><div class="profile-stat-label">Verified-quote valid rate</div></div>
       </div>
       <div class="profile-section-title">Confidence calibration</div>
       <p style="font-size:0.75rem;color:var(--text3);margin-bottom:0.5rem">Does a higher stated confidence score actually mean the gap is more likely real?</p>

@@ -52,7 +52,7 @@ Run those in your terminal.
 
 5. Render will auto-detect the `render.yaml` file — it will pre-fill:
    - **Build Command:** `pip install -r requirements.txt`
-   - **Start Command:** `gunicorn --chdir backend app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120`
+   - **Start Command:** `gunicorn --chdir backend app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 300`
 
 6. Scroll down to **Environment Variables** and add:
    ```

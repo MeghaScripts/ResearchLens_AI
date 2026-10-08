@@ -16,7 +16,7 @@ import PyPDF2, networkx as nx, uuid, datetime
 import smtplib
 from email.mime.text import MIMEText
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
 from groq import Groq
 
 # Groq deprecated llama-3.3-70b-versatile on 2026-08-16 (see
@@ -25,7 +25,9 @@ from groq import Groq
 # var so the next deprecation is a one-line fix, not a find-and-replace.
 GROQ_MODEL = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-120b')
 from werkzeug.utils import secure_filename
-from auth import require_auth
+from auth import require_auth, require_auth_or_cookie, install_download_cookie
+from llm_json import robust_json_loads
+from paper_quality import is_credible_paper, filter_credible
 from crypto_utils import encrypt_secret, decrypt_secret
 from agents import (
     Orchestrator, SearchAgent, PDFAnalysisAgent, MultiPDFAnalysisAgent,
@@ -36,7 +38,7 @@ from agents import (
     MetadataAgent, EmbeddingAgent, ValidationAgent, PlannerAgent, MemoryAgent,
     DomainClassificationAgent, DeepCollectionAgent, TrendGapDetectionAgent,
     DomainUnderstandingAgent, CurrentTrendsAgent, FullTextAnalysisAgent,
-    TrendForecastingAgent,
+    TrendForecastingAgent, PaperVerificationAgent,
     trace_to_dicts,
 )
 from events import EventBus
@@ -51,6 +53,11 @@ from publications import (
 from academic_sources import FREE_SOURCES, KEYED_SOURCES, keyed_source_status, DBLP_VENUE_STREAMS, fetch_dblp_venue, \
     SPECIALIZED_SOURCE_DOMAINS, relevant_specialized_sources
 import deep_collection
+import jobs
+import threading
+import provenance
+import paper_verification
+import verification_store
 import current_trends
 import full_text_analysis
 from agents.textsim import compute_grounded_novelty
@@ -58,7 +65,48 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.platypus import SimpleDocTemplate, Paragraph as _RLParagraph, Spacer, Table, TableStyle, HRFlowable
+
+import unicodedata as _unicodedata
+
+# ReportLab's built-in Helvetica only has WinAnsi (cp1252) glyphs. LLM text is
+# full of characters outside it (non-breaking hyphen U+2011, minus sign, arrows,
+# narrow no-break space, ...) which render as solid BLACK BOXES in the PDF.
+# Every Paragraph in this app goes through this sanitizer so that can't happen.
+_PDF_CHAR_MAP = {
+    '\u2010': '-', '\u2011': '-', '\u2012': '-', '\u2015': '\u2014', '\u2212': '-',
+    '\u00a0': ' ', '\u202f': ' ', '\u2009': ' ', '\u200a': ' ', '\u2002': ' ', '\u2003': ' ',
+    '\u200b': '', '\u200c': '', '\u200d': '', '\ufeff': '', '\u00ad': '',
+    '\u2192': '->', '\u2190': '<-', '\u2194': '<->', '\u21d2': '=>', '\u2265': '>=', '\u2264': '<=',
+    '\u2260': '!=', '\u2248': '~', '\u00d7': 'x', '\u2217': '*', '\u2713': '[x]', '\u2714': '[x]',
+    '\u2022': '\u2022', '\u25cf': '\u2022', '\u25aa': '\u2022', '\u25a0': '\u2022',
+}
+
+def pdf_safe_text(text):
+    if text is None:
+        return ''
+    text = str(text)
+    out = []
+    for ch in text:
+        ch = _PDF_CHAR_MAP.get(ch, ch)
+        for c in ch:
+            try:
+                c.encode('cp1252')
+                out.append(c)
+            except UnicodeEncodeError:
+                d = _unicodedata.normalize('NFKD', c).encode('ascii', 'ignore').decode('ascii')
+                out.append(d)  # drop anything with no sensible fallback (emoji etc.)
+    return ''.join(out)
+
+def _pdf_escape_stray_markup(text):
+    """LLM text may contain a bare '&' or '<' that would crash Paragraph's
+    mini-HTML parser. Escape them unless they are part of a tag/entity we use."""
+    text = re.sub(r'&(?!(?:amp|lt|gt|nbsp|quot|#\d+);)', '&amp;', text)
+    text = re.sub(r'<(?!/?(?:b|i|u|br|font|super|sub|strong|em|a)\b)', '&lt;', text)
+    return text
+
+def Paragraph(text, style=None, *args, **kwargs):
+    return _RLParagraph(_pdf_escape_stray_markup(pdf_safe_text(text)), style, *args, **kwargs)
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 
 app = Flask(__name__, static_folder='../frontend', static_url_path='')
@@ -219,6 +267,10 @@ def init_db():
     # with no auth and no ownership check (path traversal + IDOR). Every
     # file we generate is now recorded here with the owner's Firebase uid,
     # and the download route checks both the path and this table.
+    # Three-level verification history: one row per run plus one row per
+    # paper per run (kept AND rejected), with the four scores as real
+    # indexed columns. See verification_store.py.
+    verification_store.init_verification_tables(conn)
     conn.execute('''CREATE TABLE IF NOT EXISTS generated_files (
         filename TEXT PRIMARY KEY,
         owner_uid TEXT NOT NULL,
@@ -311,6 +363,18 @@ def login():
 def explorer_page():
     return send_from_directory('../frontend', 'explorer.html')
 
+@app.route('/deep-research')
+def deep_research_page():
+    return send_from_directory('../frontend', 'deep-research.html')
+
+@app.route('/verify')
+def verify_page():
+    """Verification Explorer — the UI for the three-level pipeline.
+    Reads the persisted runs through /api/verification-runs, so it shows
+    what was actually stored for a run rather than re-deriving anything
+    client-side."""
+    return send_from_directory('../frontend', 'verify.html')
+
 # ─── ArXiv fetch ───────────────────────────────────────────────────
 def _fetch_semantic_scholar(topic, max_results=50, venue=None, offset=0):
     """
@@ -347,7 +411,7 @@ def _fetch_semantic_scholar(topic, max_results=50, venue=None, offset=0):
         venue_param = ','.join(v.strip() for v in venue if v and v.strip())
         if venue_param:
             url += f"&venue={requests.utils.quote(venue_param)}"
-    headers = {'User-Agent': 'ResearchLensAI/1.0 (mailto:research@example.com)'}
+    headers = {'User-Agent': 'ResearchLensAI/1.0 (mailto:megham112004@gmail.com)'}
 
     max_attempts = 3
     data = None
@@ -397,6 +461,12 @@ def _fetch_semantic_scholar(topic, max_results=50, venue=None, offset=0):
             'year': year,
             'authors': authors,
             'categories': item.get('publicationTypes') or ['Academic Paper'],
+            # Same list, kept under its own key: `categories` is a
+            # display/topic field elsewhere in the app, whereas
+            # paper_verification.classify_publication_type needs the raw
+            # publicationTypes vocabulary ("JournalArticle", "Review",
+            # "Editorial", "Dataset", "Retracted Publication", ...).
+            'publication_types_native': item.get('publicationTypes') or [],
             'source': 'Semantic Scholar',
             'doi': external_ids.get('DOI', ''),
             'venue': item.get('venue', ''),
@@ -404,6 +474,7 @@ def _fetch_semantic_scholar(topic, max_results=50, venue=None, offset=0):
             'keywords_native': item.get('fieldsOfStudy') or [],
             'reference_titles': reference_titles,
             'author_ids_ss': author_ids_ss,
+            'ss_id': item.get('paperId', ''),
         })
     return papers
 
@@ -426,7 +497,7 @@ def _fetch_openalex(topic, max_results=50, page=1):
         url = (
             f"https://api.openalex.org/works?search={query}"
             f"&per_page={min(max_results, 100)}&page={max(1, page)}"
-            f"&mailto=research@example.com"
+            f"&mailto=megham112004@gmail.com"
         )
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
@@ -514,7 +585,7 @@ def _fetch_arxiv_for_multi(topic, max_results, offset=0):
     (impact scoring falls back to recency-only for arXiv results)."""
     query = topic.replace(' ', '+')
     url = f"https://export.arxiv.org/api/query?search_query=all:{query}&start={max(0, offset)}&max_results={max_results}&sortBy=submittedDate&sortOrder=descending"
-    resp = requests.get(url, timeout=8, headers={'User-Agent': 'ResearchLensAI/1.0 (mailto:research@example.com)'})
+    resp = requests.get(url, timeout=8, headers={'User-Agent': 'ResearchLensAI/1.0 (mailto:megham112004@gmail.com)'})
     resp.raise_for_status()
     papers = _parse_arxiv_xml(resp.text)
     for p in papers:
@@ -559,6 +630,8 @@ def fetch_papers_multi_source(topic, max_results=50, sources=None, venue_filter=
 
     def add_papers(papers):
         for p in papers:
+            if not is_credible_paper(p):
+                continue   # junk/test records (e.g. title 'dfgdf', authors 'AI AI')
             key = _normalize_title(p['title'])
             if key and key not in seen_titles:
                 seen_titles.add(key)
@@ -908,7 +981,7 @@ def fetch_arxiv_papers(topic, max_results=50):
     for endpoint_idx, url in enumerate(endpoints):
         for attempt in range(2):  # 2 attempts per endpoint — faster failover to Semantic Scholar
             try:
-                resp = requests.get(url, timeout=8, headers={'User-Agent': 'ResearchLensAI/1.0 (mailto:research@example.com)'})
+                resp = requests.get(url, timeout=8, headers={'User-Agent': 'ResearchLensAI/1.0 (mailto:megham112004@gmail.com)'})
                 resp.raise_for_status()
                 papers = _parse_arxiv_xml(resp.text)
                 if papers:
@@ -1210,7 +1283,7 @@ def _parse_groq_json(raw, log_prefix):
     raw = re.sub(r'\n?```$', '', raw)
     raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
     try:
-        return json.loads(raw)
+        return robust_json_loads(raw)
     except Exception as e:
         salvaged = _salvage_truncated_json(raw)
         if salvaged is not None:
@@ -1416,7 +1489,7 @@ Provide a comprehensive multi-paper analysis as pure JSON (no markdown):
     # Clean bad escapes the LLM sometimes produces
     import re as _re2
     raw = _re2.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-    result = json.loads(raw)
+    result = robust_json_loads(raw)
 
     # Real, computed novelty score — see analyze_gaps_with_groq above for
     # the full rationale. Subject text here is the combined text of all
@@ -1474,12 +1547,12 @@ Respond with pure JSON, no markdown:
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3, max_tokens=800,
+        temperature=0.3, max_tokens=2500,
     )
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r'^```[a-z]*\n?', '', raw)
     raw = re.sub(r'\n?```$', '', raw)
-    return json.loads(raw)
+    return robust_json_loads(raw)
 
 
 def forecast_research_trends_with_groq(api_key, topic, trend_stats, current_trends=None):
@@ -1552,16 +1625,17 @@ Provide pure JSON, no markdown:
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3, max_tokens=1500,
+        temperature=0.3, max_tokens=3500,
     )
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r'^```[a-z]*\n?', '', raw)
     raw = re.sub(r'\n?```$', '', raw)
     raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-    return json.loads(raw)
+    return robust_json_loads(raw)
 
 
-def analyze_deep_research_gaps_with_groq(api_key, topic, papers, trend_stats, current_trends=None, forecast=None):
+def analyze_deep_research_gaps_with_groq(api_key, topic, papers, trend_stats, current_trends=None, forecast=None,
+                                         max_evidence_papers=None):
     """
     Gap detection for the deep-collection pipeline (deep_collection.py):
     the input here is the Stage-2 top-(up to 500) impact-ranked papers
@@ -1588,6 +1662,13 @@ def analyze_deep_research_gaps_with_groq(api_key, topic, papers, trend_stats, cu
     in one Groq call. Each batch gets its own gap-detection call against
     the same trend_stats/current_trends/forecast context; the resulting
     gaps are merged and deduplicated across all batches.
+
+    `max_evidence_papers`: when set (the 'fast'/'balanced' speed presets),
+    only the first N papers (already impact-ranked) are listed to the LLM.
+    Each ~100 papers costs one Groq call plus a rate-limit pause, so
+    listing all 500 was a large share of total deep-research time.
+    trend_stats is still computed over the WHOLE corpus, and the gap
+    validation afterwards still checks every collected paper.
     """
     client = Groq(api_key=api_key)
     line_fn = lambda p: (
@@ -1595,7 +1676,8 @@ def analyze_deep_research_gaps_with_groq(api_key, topic, papers, trend_stats, cu
         f"impact_score={p.get('impact_score', 0)}"
         f"{', citations=' + str(int(p['citation_count'])) if p.get('citation_count') is not None else ''})"
     )
-    batches = list(_chunk_papers_by_token_budget(papers, line_fn, reserved_tokens=4200, overhead_tokens=1400))
+    evidence_papers = papers[:max_evidence_papers] if max_evidence_papers else papers
+    batches = list(_chunk_papers_by_token_budget(evidence_papers, line_fn, reserved_tokens=4200, overhead_tokens=1400))
     merged = {"research_gaps": []}
     got_headline_fields = False
     succeeded = 0
@@ -1912,6 +1994,7 @@ orchestrator.register(TrendForecastingAgent(deep_collection.keyword_trend_stats,
 orchestrator.register(DomainUnderstandingAgent(analyze_domain_understanding_with_groq))
 orchestrator.register(CurrentTrendsAgent(current_trends.web_search_current_trends, current_trends.current_trends_available))
 orchestrator.register(FullTextAnalysisAgent(full_text_analysis.deep_analyze_top_papers, GROQ_MODEL))
+orchestrator.register(PaperVerificationAgent(paper_verification.verify_papers))
 
 # Publication Intelligence routes (/api/domains, /api/journals, /api/conferences,
 # /api/societies, /api/publishers, /api/classify-research-topic). Registered as
@@ -1936,23 +2019,206 @@ def list_agents():
     return jsonify({'agents': orchestrator.list_agents()})
 
 
+# ─── Paper verification for the standard (non-deep) analysis ──────────
+#
+# /api/analyze and /api/analyze-multi fetch papers from the selected
+# sources, then run the SAME three-level verification (authenticity ->
+# relevance -> quality) the deep pipeline uses, so a paper that is
+# retracted, unresolvable or off-topic cannot shape the gap analysis in
+# either mode. Differences from deep mode, all for speed:
+#   * only the top STANDARD_VERIFY_NETWORK_TOP_N papers get per-paper
+#     Crossref/registry round trips (OpenAlex/S2 checks are batched and
+#     still cover every paper);
+#   * it runs on COPIES of the papers in a background thread, in parallel
+#     with keyword/metadata/domain steps, and is abandoned (analysis
+#     continues, papers labelled unverified) after STANDARD_VERIFY_TIMEOUT_S;
+#   * only papers that were REJECTED (positive evidence of a problem) are
+#     removed. Merely-uncorroborated papers stay, labelled, because with
+#     ~40 papers a strict "VERIFIED only" gate would remove most of them.
+STANDARD_VERIFY_ENABLED = os.environ.get('STANDARD_VERIFY_ENABLED', '1') != '0'
+STANDARD_VERIFY_NETWORK_TOP_N = int(os.environ.get('STANDARD_VERIFY_NETWORK_TOP_N', '40'))
+STANDARD_VERIFY_TIMEOUT_S = float(os.environ.get('STANDARD_VERIFY_TIMEOUT_S', '40'))
+_verify_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='std-verify')
+
+_VERIFY_FIELDS_ON_PAPER = (
+    'verification_status', 'authenticity_score', 'relevance_score', 'quality_score',
+    'overall_score', 'passed_verification', 'publication_type', 'is_retracted',
+    'verification_reasons')
+
+
+def _start_standard_verification(context):
+    """Starts verification of context['papers'] on copies. Returns
+    (future, originals, work_copies, t0) or None when there is nothing to do."""
+    if not STANDARD_VERIFY_ENABLED:
+        return None
+    originals = list(context.get('papers') or [])
+    if not originals:
+        return None
+    work = [dict(p) for p in originals]
+    for p in work:
+        try:
+            provenance.stamp_provenance(p, p.get('source') or 'unknown')
+            deep_collection.compute_impact_score(p)
+        except Exception as e:
+            print(f"standard verification: could not prepare '{p.get('title','')[:50]}': {e}")
+    fut = _verify_pool.submit(
+        paper_verification.verify_papers, work, context.get('topic', ''),
+        idea_description=context.get('idea_description'),
+        network_top_n=STANDARD_VERIFY_NETWORK_TOP_N)
+    return fut, originals, work, time.monotonic()
+
+
+def _finish_standard_verification(job, context, topic, owner_uid, mode_label='standard'):
+    """Waits (bounded) for the job, drops REJECTED papers from
+    context['papers'], labels the rest, persists the run, and returns
+    (verification_info, rejected_list_for_response, papers_were_removed)."""
+    if job is None:
+        return {'ran': False, 'reason': 'disabled or no papers'}, [], False
+    fut, originals, work, t0 = job
+    remaining = max(0.5, STANDARD_VERIFY_TIMEOUT_S - (time.monotonic() - t0))
+    try:
+        result = fut.result(timeout=remaining)
+    except FuturesTimeout:
+        fut.cancel()
+        print(f"standard verification: not finished in {STANDARD_VERIFY_TIMEOUT_S:.0f}s; continuing unverified")
+        return ({'ran': False, 'error': f'verification did not finish within {STANDARD_VERIFY_TIMEOUT_S:.0f}s; '
+                                        'papers are shown unverified'}, [], False)
+    except Exception as e:
+        print(f"standard verification failed, continuing unverified: {e}")
+        return {'ran': False, 'error': str(e)}, [], False
+
+    keep_originals, rejected_out = [], []
+    for orig, w in zip(originals, work):
+        for f in _VERIFY_FIELDS_ON_PAPER:
+            if f in w:
+                orig[f] = w[f]
+        if w.get('passed_verification') is False:
+            rejected_out.append({
+                'title': w.get('title'), 'year': w.get('year'), 'source': w.get('source'),
+                'doi': w.get('doi'), 'verification_status': w.get('verification_status'),
+                'verification_reasons': w.get('verification_reasons'),
+                'authenticity_score': w.get('authenticity_score'),
+                'relevance_score': w.get('relevance_score')})
+        else:
+            keep_originals.append(orig)
+
+    removed = False
+    if keep_originals:
+        removed = len(keep_originals) != len(originals)
+        context['papers'] = keep_originals
+    else:
+        # Everything rejected: keep the fetched set rather than run the
+        # analysis on nothing, and say so.
+        print("standard verification: every paper was rejected; keeping the unfiltered set")
+
+    info = {k: v for k, v in result.items() if k not in ('kept', 'rejected')}
+    info.update({'ran': True, 'mode': mode_label,
+                 'all_rejected_kept_unfiltered': not keep_originals and bool(rejected_out),
+                 'rejected_removed_from_analysis': len(rejected_out) if keep_originals else 0})
+    try:
+        conn = get_db()
+        info['run_id'] = verification_store.save_verification_run(
+            conn, topic, result, result.get('kept'), result.get('rejected'),
+            owner_uid=owner_uid, queries_used=[topic],
+            sources_selected=sorted({p.get('source') for p in originals if p.get('source')}),
+            mode=mode_label)
+        conn.close()
+        info['persisted'] = True
+    except Exception as e:
+        print(f"standard verification: could not persist run: {e}")
+        info['persisted'] = False
+        info['persist_error'] = str(e)
+    return info, rejected_out, removed
+
+
 # ─── Single paper analysis endpoint ─────────────────────────────────
+def _read_single_form():
+    """Reads the analyze form fields while still inside the request."""
+    paper_sources_raw = request.form.get('paper_sources','').strip()
+    venue_filter_raw = request.form.get('venue_filter','').strip()
+    return {
+        'api_key': request.form.get('api_key','').strip(),
+        'topic': request.form.get('topic','').strip(),
+        'idea_description': request.form.get('idea_description','').strip(),
+        'primary_domain': request.form.get('primary_domain','').strip(),
+        'secondary_domains': request.form.get('secondary_domains','').strip(),
+        'preferred_venues': request.form.get('preferred_venues','').strip(),
+        'paper_sources': [s.strip() for s in paper_sources_raw.split(',') if s.strip()] if paper_sources_raw else None,
+        'venue_filter': [v.strip() for v in venue_filter_raw.split(',') if v.strip()] if venue_filter_raw else None,
+    }
+
+
+def _save_uploaded_pdf(pdf_file):
+    if pdf_file and pdf_file.filename:
+        fname = f"{uuid.uuid4()}_{secure_filename(pdf_file.filename)}"
+        fpath = os.path.join(UPLOAD_FOLDER, fname)
+        pdf_file.save(fpath)
+        return fpath
+    return None
+
+
 @app.route('/api/analyze', methods=['POST'])
 @require_auth
 def analyze():
-    api_key  = request.form.get('api_key','').strip()
-    topic    = request.form.get('topic','').strip()
-    idea_description  = request.form.get('idea_description','').strip()
-    primary_domain    = request.form.get('primary_domain','').strip()
-    secondary_domains = request.form.get('secondary_domains','').strip()
-    preferred_venues  = request.form.get('preferred_venues','').strip()
-    paper_sources_raw = request.form.get('paper_sources','').strip()
-    paper_sources = [s.strip() for s in paper_sources_raw.split(',') if s.strip()] if paper_sources_raw else None
-    venue_filter_raw = request.form.get('venue_filter','').strip()
-    venue_filter = [v.strip() for v in venue_filter_raw.split(',') if v.strip()] if venue_filter_raw else None
-    pdf_file = request.files.get('pdf')
-    if not api_key: return jsonify({'error':'Groq API key is required'}),400
-    if not topic:   return jsonify({'error':'Research topic is required'}),400
+    form = _read_single_form()
+    if not form['api_key']: return jsonify({'error':'Groq API key is required'}),400
+    if not form['topic']:   return jsonify({'error':'Research topic is required'}),400
+    pdf_path = _save_uploaded_pdf(request.files.get('pdf'))
+    payload, status = _run_single_analysis(form, pdf_path, g.uid)
+    return jsonify(payload), status
+
+
+@app.route('/api/analyze/start', methods=['POST'])
+@require_auth
+def analyze_start():
+    """Starts the single-paper pipeline in a background thread and returns a
+    job_id immediately; the frontend polls /api/analyze/status/<job_id>."""
+    form = _read_single_form()
+    if not form['api_key']: return jsonify({'error':'Groq API key is required'}),400
+    if not form['topic']:   return jsonify({'error':'Research topic is required'}),400
+    pdf_path = _save_uploaded_pdf(request.files.get('pdf'))
+    uid = g.uid
+    job_id = jobs.create_job(uid)
+
+    def _worker():
+        try:
+            payload, status = _run_single_analysis(form, pdf_path, uid, job_id=job_id)
+            if status == 200:
+                jobs.finish_job(job_id, result=payload)
+            else:
+                jobs.finish_job(job_id, error=payload.get('error') or 'Analysis failed')
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            jobs.finish_job(job_id, error=str(e))
+
+    threading.Thread(target=_worker, daemon=True, name=f'analyze-{job_id}').start()
+    return jsonify({'job_id': job_id})
+
+
+@app.route('/api/analyze/status/<job_id>', methods=['GET'])
+@require_auth
+def analyze_status(job_id):
+    job = jobs.get_job(job_id, uid=g.uid)
+    if job is None:
+        return jsonify({'error': 'Job not found'}), 404
+    return jsonify({
+        'status': job['status'], 'steps': job['steps'],
+        'papers_count': job['papers_count'], 'papers_sample': job['papers_sample'],
+        'result': job['result'] if job['status'] == 'done' else None,
+        'error': job['error'],
+    })
+
+
+def _run_single_analysis(form, pdf_path, uid, job_id=None):
+    """The single-paper pipeline. Returns (payload_dict, http_status). Takes
+    plain values (no flask request/g) so it can run in a background thread."""
+    api_key = form['api_key']; topic = form['topic']
+    idea_description = form['idea_description']
+    primary_domain = form['primary_domain']
+    secondary_domains = form['secondary_domains']
+    preferred_venues = form['preferred_venues']
+    paper_sources = form['paper_sources']
+    venue_filter = form['venue_filter']
 
     # The optional "Describe Your Idea" text enriches the topic used for
     # search / gap-detection / report generation (context['topic']), but
@@ -1970,24 +2236,28 @@ def analyze():
         'venue_filter': venue_filter,    # None = no venue restriction (applies to Semantic Scholar only)
     }
 
-    if pdf_file and pdf_file.filename:
-        fname = f"{uuid.uuid4()}_{pdf_file.filename}"
-        fpath = os.path.join(UPLOAD_FOLDER, fname)
-        pdf_file.save(fpath)
-        context['pdf_filepath'] = fpath
+    if pdf_path:
+        context['pdf_filepath'] = pdf_path
+    if job_id:
+        context['_job_id'] = job_id
 
     # Orchestrated pipeline: PDF -> Search -> Keywords -> Gap Detection ->
     # Knowledge Graph -> Trends -> Report. Each step's error is mapped to
     # the same HTTP status/message the old inline code returned.
     r = orchestrator.run_agent('pdf_agent', context)
     if not r.success:
-        return jsonify({'error': f'PDF processing failed: {r.error}'}), 500
+        return {'error': f'PDF processing failed: {r.error}'}, 500
 
     r = orchestrator.run_agent('search_agent', context)
     if not r.success:
         if isinstance(r.exception, ArxivUnavailableError):
-            return jsonify({'error': str(r.exception), 'error_type': 'arxiv_unreachable', 'source_label': getattr(r.exception, 'source_label', 'ArXiv')}), 503
-        return jsonify({'error': f'Search failed: {r.error}'}), 500
+            return {'error': str(r.exception), 'error_type': 'arxiv_unreachable', 'source_label': getattr(r.exception, 'source_label', 'ArXiv')}, 503
+        return {'error': f'Search failed: {r.error}'}, 500
+
+    # Three-level paper verification runs in the background on copies of
+    # the fetched papers while the cheap steps below execute (see
+    # _start_standard_verification).
+    verify_job = _start_standard_verification(context)
 
     # keyword_agent and metadata_agent both only need context['papers'] /
     # pdf_plain — neither depends on the other's output — so run them
@@ -2000,11 +2270,18 @@ def analyze():
     # trace and context['domain_classification'] simply stays unset.
     orchestrator.run_agent('domain_classification_agent', context)
 
+    verification, rejected_papers, papers_removed = _finish_standard_verification(
+        verify_job, context, topic, uid)
+    if papers_removed:
+        # Keywords/metadata were derived from the unfiltered set; redo them
+        # (cheap, no LLM) so rejected papers don't influence the gap analysis.
+        orchestrator.run_parallel(['keyword_agent', 'metadata_agent'], context)
+
     r = orchestrator.run_agent('gap_detection_agent', context)
     if not r.success:
         if isinstance(r.exception, json.JSONDecodeError):
-            return jsonify({'error': f'AI returned malformed JSON. Try again. {r.error}'}), 500
-        return jsonify({'error': f'AI analysis failed: {r.error}'}), 500
+            return {'error': f'AI returned malformed JSON. Try again. {r.error}'}, 500
+        return {'error': f'AI analysis failed: {r.error}'}, 500
 
     papers = context['papers']
     keywords = context['keywords']
@@ -2053,7 +2330,7 @@ def analyze():
     # detection above.
     context['topic'] = topic
     orchestrator.run_agent('report_agent', context)
-    record_generated_file(report_filename, g.uid)
+    record_generated_file(report_filename, uid)
 
     # Save analysis to DB for history/tracking — document_text lets the
     # RAG Research Assistant Agent answer follow-up questions later
@@ -2063,7 +2340,7 @@ def analyze():
         conn = get_db()
         cur = conn.execute(
             'INSERT INTO analyses (topic, owner_uid, analysis_json, papers_json, gaps_count, created_at, document_text) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (topic, g.uid, json.dumps(analysis), json.dumps(papers[:20]), len(analysis.get('research_gaps',[])), datetime.datetime.now().isoformat(), pdf_plain[:12000])
+            (topic, uid, json.dumps(analysis), json.dumps(papers[:20]), len(analysis.get('research_gaps',[])), datetime.datetime.now().isoformat(), pdf_plain[:12000])
         )
         analysis_id = cur.lastrowid
         conn.commit()
@@ -2082,20 +2359,60 @@ def analyze():
     except Exception as e:
         print(f"DB save error: {e}")
 
-    return jsonify({
+    return {
         'analysis': analysis, 'papers': papers, 'keywords': keywords[:25],
         'metadata': metadata, 'graph': graph_data, 'year_data': year_data, 'cat_data': cat_data,
         'report_id': report_id, 'report_filename': report_filename, 'mode': 'single',
         'analysis_id': analysis_id, 'validation': validation_result.data,
+        'verification': verification, 'rejected_papers': rejected_papers,
         'domain_classification': context.get('domain_classification'),
         'idea_description': idea_description or None,
         'primary_domain': primary_domain or None,
         'secondary_domains': secondary_domains or None,
         'preferred_venues': preferred_venues or None,
         'agent_trace': trace_to_dicts(context.get('_trace', [])),
+    }, 200
+
+# Past this many seconds, optional deep-research stages are skipped (see
+# deep_research). Keep it well under the gunicorn --timeout in render.yaml.
+DEEP_SOFT_BUDGET_S = float(os.environ.get('DEEP_SOFT_BUDGET_S', '100'))
+
+
+@app.route('/api/deep-research/sources', methods=['GET'])
+@require_auth
+def deep_research_sources():
+    """Sources a deep-research run can fetch papers from, for the UI's
+    source picker. 'available' is False for a keyed source whose API key
+    is not configured on this server (selecting it would silently return
+    nothing), 'specialized' marks subject-specific databases that are
+    otherwise only auto-included when the domain matches, and 'default'
+    marks the ones a run without an explicit selection always uses."""
+    from academic_sources import SPECIALIZED_SOURCE_DOMAINS
+    keyed = keyed_source_status() or {}
+    def _keyed_ok(name):
+        v = keyed.get(name)
+        return bool(v.get('configured')) if isinstance(v, dict) else bool(v)
+    out = [{'name': n, 'available': True, 'keyed': False, 'specialized': False, 'default': True}
+           for n in ('ArXiv', 'Semantic Scholar', 'OpenAlex')]
+    for n in FREE_SOURCES:
+        spec = n in SPECIALIZED_SOURCE_DOMAINS
+        out.append({'name': n, 'available': True, 'keyed': False,
+                    'specialized': spec, 'default': not spec})
+    for n in KEYED_SOURCES:
+        ok = _keyed_ok(n)
+        out.append({'name': n, 'available': ok, 'keyed': True,
+                    'specialized': n in SPECIALIZED_SOURCE_DOMAINS, 'default': ok and n not in SPECIALIZED_SOURCE_DOMAINS})
+    return jsonify({
+        'sources': out,
+        'venue_streams': sorted(DBLP_VENUE_STREAMS.keys()) if hasattr(DBLP_VENUE_STREAMS, 'keys') else list(DBLP_VENUE_STREAMS),
+        'speeds': {k: {kk: vv for kk, vv in v.items() if kk in
+                       ('per_source_cap', 'max_pages', 'max_queries', 'total_budget_s')}
+                   for k, v in deep_collection.DEEP_SPEED_PRESETS.items()},
+        'default_speed': deep_collection.DEFAULT_SPEED,
     })
 
-# ─── Deep research: exhaustive multi-source collection + impact ranking ──
+
+# ─── Deep research: multi-source collection + impact ranking ──
 @app.route('/api/deep-research', methods=['POST'])
 @require_auth
 def deep_research():
@@ -2135,6 +2452,38 @@ def deep_research():
          ID — see 'authors_with_influence_data'/
          'institutions_with_influence_data' below) and re-ranks on the
          combined pool, and keeps the top 500 overall.
+      4b. (On by default) Runs three-level paper verification
+         (paper_verification.py) over the top 500: Level 1 authenticity
+         (persistent identifier -> DOI resolution at Crossref ->
+         cross-source metadata agreement across Crossref/OpenAlex ->
+         retraction status), Level 2 topical relevance, Level 3 quality
+         (venue, publication type, metadata completeness, methodology
+         evidence, author/affiliation). Venue quality is a REAL lookup
+         of the venue itself in OpenAlex's /sources index (h-index,
+         2-year mean citedness, CWTS-Leiden core membership, DOAJ
+         indexing, registered publisher) with an independent DOAJ
+         confirmation pass — and deliberately carries NO Q1-Q4
+         quartile, because quartiles are a Scopus/JCR product with no
+         free API and an inferred quartile would be fabricated data.
+         Author authenticity is a REAL ORCID check: the iD's ISO 7064
+         check digit is validated offline, the iD is then resolved
+         against the ORCID public API, and the registered name is
+         compared with this paper's author list. Each paper keeps four separate
+         scores — authenticity/relevance/quality/impact — plus a
+         verification_status. Papers are only REJECTED on positive
+         evidence of a problem (contradicted metadata, an unresolvable
+         DOI, a retraction, or a non-research publication type such as
+         dataset/editorial/news); a paper that simply could not be
+         corroborated is kept and labelled UNVERIFIED rather than
+         deleted, because "unchecked" and "failed the check" are
+         different claims. Rejected papers are returned separately under
+         'rejected_papers' and are excluded from steps 5-8. No LLM
+         judgement is used in this step. Disable with
+         'verify_papers': false; keep rejected papers in the downstream
+         analysis with 'drop_unverified': false; bound the per-paper
+         Crossref round trips with 'verify_network_top_n' (default 100
+         by impact rank — OpenAlex checks are batched and cover all
+         papers).
       5. (Optional, off by default — needs TAVILY_API_KEY/SERPER_API_KEY)
          Runs a real live web search for what's currently happening in
          this topic outside the academic literature (flowchart stage 15
@@ -2159,38 +2508,80 @@ def deep_research():
          every collected paper, or pass 'full_text_top_n' to bound it to
          a cheaper/faster slice by impact rank.
 
-    This can take a while (multiple sources, each paged multiple times)
-    — expect this endpoint to run considerably longer than /api/analyze,
-    and longer still with the optional stages enabled.
+    SPEED: the request's 'speed' field picks how much to collect
+    ('fast' default / 'balanced' / 'exhaustive', see
+    deep_collection.DEEP_SPEED_PRESETS). Sources are collected in
+    parallel under per-source and whole-stage time budgets, so a run is
+    bounded to roughly a minute or two instead of the sum of every
+    source's paging time. The response's 'collection_limits' and
+    'timings' say exactly which limits applied and where time went;
+    'exhaustive' restores the old near-unbounded behaviour.
+
+    SOURCES: 'paper_sources' (list or comma-separated string) picks
+    which sources to search; GET /api/deep-research/sources lists the
+    valid names. Omit it for automatic domain-based selection.
     """
+    request_started = time.monotonic()
+    timings = {}
+    skipped_stages = []
+
+    def _stage(name, agent_name):
+        t = time.monotonic()
+        res = orchestrator.run_agent(agent_name, context)
+        timings[name] = round(time.monotonic() - t, 1)
+        return res
+
     data = request.get_json(silent=True) or {}
     api_key = (data.get('api_key') or '').strip()
     topic = (data.get('topic') or '').strip()
-    paper_sources = data.get('paper_sources')       # optional list; default = all sources
+    paper_sources = data.get('paper_sources')       # optional list; default = domain-based selection
+    if isinstance(paper_sources, str):
+        paper_sources = [x.strip() for x in paper_sources.split(',') if x.strip()]
+    paper_sources = paper_sources or None
     venue_filter = data.get('venue_filter')          # optional list of AAAI/NeurIPS/ICML/ICLR
+    if isinstance(venue_filter, str):
+        venue_filter = [x.strip() for x in venue_filter.split(',') if x.strip()]
+    venue_filter = venue_filter or None
+    limits = deep_collection.resolve_limits(data.get('speed'))
     if not api_key:
         return jsonify({'error': 'Groq API key is required'}), 400
     if not topic:
         return jsonify({'error': 'Research topic is required'}), 400
 
     expand_queries = data.get('expand_queries', True)
+    # Three-level verification (authenticity -> relevance -> quality) runs
+    # by default; 'verify_papers': false skips it entirely, and
+    # 'drop_unverified': false keeps rejected papers in the downstream
+    # gap analysis while still labelling them.
+    verify_papers_enabled = bool(data.get('verify_papers', True))
+    drop_unverified = bool(data.get('drop_unverified', True))
+    _raw_verify_n = data.get('verify_network_top_n')
+    verify_network_top_n = (int(_raw_verify_n) if _raw_verify_n not in (None, '')
+                            else limits['verify_network_top_n'])
     include_current_trends = bool(data.get('include_current_trends', False))
     include_full_text_analysis = bool(data.get('include_full_text_analysis', False))
     # None = analyze every collected paper (flowchart stage 12's "every
     # selected paper"); caller may pass an int to bound it.
     _raw_top_n = data.get('full_text_top_n')
-    full_text_top_n = int(_raw_top_n) if _raw_top_n not in (None, '') else None
+    full_text_top_n = int(_raw_top_n) if _raw_top_n not in (None, '') else limits['full_text_top_n']
 
     context = {
+        'deep_speed': limits['speed'],
+        # fast/balanced list only the top-ranked papers to the LLM (see
+        # analyze_deep_research_gaps_with_groq); exhaustive lists all.
+        'deep_llm_evidence_papers': {'fast': 200, 'balanced': 350}.get(limits['speed']),
         'api_key': api_key, 'topic': topic,
         'paper_sources': paper_sources, 'venue_filter': venue_filter,
         'domain': data.get('domain'), 'sub_domain': data.get('sub_domain'),
         'keywords': data.get('keywords'), 'research_question': data.get('research_question'),
+        'idea_description': data.get('idea_description'),
         'full_text_top_n': full_text_top_n,
+        'drop_unverified': drop_unverified,
+        'verify_network_top_n': verify_network_top_n,
     }
 
     if expand_queries:
-        r = orchestrator.run_agent('domain_understanding_agent', context)
+        r = _stage('query_expansion', 'domain_understanding_agent')
         if not r.success:
             # Query expansion failing shouldn't block the whole pipeline —
             # fall back to just the literal topic, same as if the caller
@@ -2198,32 +2589,85 @@ def deep_research():
             print(f"deep_research: domain understanding failed, continuing without it: {r.error}")
             context.setdefault('deep_extra_queries', [])
 
-    r = orchestrator.run_agent('deep_collection_agent', context)
+    r = _stage('collection', 'deep_collection_agent')
     if not r.success:
         return jsonify({'error': f'Deep collection failed: {r.error}'}), 500
     if not context.get('deep_papers'):
         return jsonify({'error': 'No papers were collected from any selected source for this topic.'}), 503
 
+    if verify_papers_enabled:
+        r = _stage('verification', 'paper_verification_agent')
+        if not r.success:
+            # Verification failing must not silently downgrade the run to
+            # "unverified papers presented as verified" — the response
+            # says so explicitly and every paper keeps no verification
+            # fields at all, rather than defaulting to a passing status.
+            print(f"deep_research: paper verification failed, continuing unverified: {r.error}")
+            context['deep_verification'] = {'error': r.error, 'ran': False}
+        else:
+            # Persist the run so the four scores survive the response.
+            # A DB failure must not lose the analysis the caller already
+            # paid for, so it is logged and reported, never raised.
+            try:
+                conn = get_db()
+                run_id = verification_store.save_verification_run(
+                    conn, topic, r.data, r.data.get('kept'), r.data.get('rejected'),
+                    owner_uid=g.uid,
+                    queries_used=context.get('deep_queries_used', [topic]),
+                    sources_selected=context.get('deep_sources_selected'),
+                    mode='deep', speed=limits['speed'])
+                conn.close()
+                context['deep_verification']['run_id'] = run_id
+                context['deep_verification']['persisted'] = True
+            except Exception as e:
+                print(f"deep_research: could not persist verification run: {e}")
+                context['deep_verification']['persisted'] = False
+                context['deep_verification']['persist_error'] = str(e)
+        if not context.get('deep_papers'):
+            return jsonify({
+                'error': ('Every collected paper was rejected by verification. '
+                          'Re-run with "drop_unverified": false to inspect why.'),
+                'verification': context.get('deep_verification'),
+                'rejected_sample': [
+                    {'title': p.get('title'), 'source': p.get('source'),
+                     'verification_status': p.get('verification_status'),
+                     'verification_reasons': p.get('verification_reasons')}
+                    for p in (context.get('deep_rejected_papers') or [])[:20]
+                ],
+            }), 503
+
     if include_current_trends:
-        r = orchestrator.run_agent('current_trends_agent', context)
+        r = _stage('current_trends', 'current_trends_agent')
         if not r.success:
             print(f"deep_research: current-trends search failed, continuing without it: {r.error}")
             context.setdefault('deep_current_trends', [])
 
-    r = orchestrator.run_agent('trend_forecasting_agent', context)
-    if not r.success:
+    # The forecast is an optional extra LLM call. If collection + verification
+    # already used most of the request's time (slow upstream APIs), skip it
+    # so the gap analysis — the part the user came for — still completes
+    # inside the server's request timeout.
+    elapsed_so_far = time.monotonic() - request_started
+    if limits['speed'] != 'exhaustive' and elapsed_so_far > DEEP_SOFT_BUDGET_S:
+        skipped_stages.append('trend_forecasting')
+        print(f"deep_research: skipping trend forecasting ({elapsed_so_far:.0f}s elapsed > "
+              f"{DEEP_SOFT_BUDGET_S:.0f}s soft budget)")
+        context.setdefault('deep_trend_forecast', None)
+        r = None
+    else:
+        r = _stage('trend_forecasting', 'trend_forecasting_agent')
+    if r is not None and not r.success:
         # Forecasting failing shouldn't block gap detection — it just
         # runs without a stage-16 forecast to build on, same as if this
         # step were skipped outright.
         print(f"deep_research: trend forecasting failed, continuing without it: {r.error}")
         context.setdefault('deep_trend_forecast', None)
 
-    r = orchestrator.run_agent('trend_gap_detection_agent', context)
+    r = _stage('gap_detection', 'trend_gap_detection_agent')
     if not r.success:
         return jsonify({'error': f'Trend/gap analysis failed: {r.error}'}), 500
 
     if include_full_text_analysis:
-        r = orchestrator.run_agent('full_text_analysis_agent', context)
+        r = _stage('full_text_analysis', 'full_text_analysis_agent')
         if not r.success:
             print(f"deep_research: full-text analysis failed, continuing without it: {r.error}")
 
@@ -2234,22 +2678,82 @@ def deep_research():
     top_papers_rest = [
         {'title': p.get('title'), 'year': p.get('year'), 'source': p.get('source'),
          'impact_score': p.get('impact_score'), 'impact_score_basis': p.get('impact_score_basis'),
-         'combined_rank': p.get('combined_rank'), 'deep_analysis': p.get('deep_analysis')}
+         'combined_rank': p.get('combined_rank'), 'deep_analysis': p.get('deep_analysis'),
+         'authenticity_score': p.get('authenticity_score'),
+         'relevance_score': p.get('relevance_score'),
+         'quality_score': p.get('quality_score'),
+         'overall_score': p.get('overall_score'),
+         'verification_status': p.get('verification_status'),
+         'publication_type': p.get('publication_type'),
+         'peer_reviewed': p.get('peer_reviewed'),
+         'is_retracted': p.get('is_retracted'),
+         'venue_quality_registry': p.get('venue_quality_registry'),
+         'venue_is_core': p.get('venue_is_core'),
+         'venue_in_doaj': p.get('venue_in_doaj'),
+         'publisher_agreement': p.get('publisher_agreement'),
+         'author_orcid_status': p.get('author_orcid_status')}
         for p in context['deep_papers'][100:]
     ]
 
+    timings['total'] = round(time.monotonic() - request_started, 1)
     return jsonify({
         'topic': topic,
+        'speed': limits['speed'],
+        'collection_limits': context.get('deep_collection_limits'),
+        'timings': timings,
+        'skipped_stages': skipped_stages,
         'domain_understanding': context.get('deep_domain_understanding'),
         'queries_used': context.get('deep_queries_used', [topic]),
         'stage0_stats': context.get('deep_stage0_stats'),
         'stage1_stats': context.get('deep_stage1_stats'),
         'stage2_count': len(context['deep_papers']),
+        'verification': context.get('deep_verification', {'ran': False, 'reason': 'disabled by request'}),
+        'rejected_papers': [
+            {'title': p.get('title'), 'year': p.get('year'), 'source': p.get('source'),
+             'doi': p.get('doi'),
+             'verification_status': p.get('verification_status'),
+             'verification_reasons': p.get('verification_reasons'),
+             'authenticity_score': p.get('authenticity_score'),
+             'relevance_score': p.get('relevance_score'),
+             'publication_type': p.get('publication_type')}
+            for p in (context.get('deep_rejected_papers') or [])
+        ],
         'citations_backfilled': context.get('deep_citations_backfilled'),
         'sources_with_citation_data': context.get('deep_sources_with_citation_data'),
         'sources_recency_only': context.get('deep_sources_recency_only'),
         'sources_selected': context.get('deep_sources_selected'),
         'sources_skipped_by_domain': context.get('deep_sources_skipped_by_domain'),
+        # Kept and verified, but not HIGHLY_VERIFIED/VERIFIED/
+        # PARTIALLY_VERIFIED -- visible for audit, deliberately excluded
+        # from gap detection / trend analysis / ranking (see
+        # paper_verification.filter_for_ranking and the hard-gate note
+        # in PaperVerificationAgent). Lighter shape than rejected_papers
+        # since these are not error cases, just not trusted to vote.
+        'excluded_from_ranking': [
+            {'title': p.get('title'), 'year': p.get('year'), 'source': p.get('source'),
+             'doi': p.get('doi'), 'verification_status': p.get('verification_status'),
+             'authenticity_score': p.get('authenticity_score'),
+             'overall_score': p.get('overall_score')}
+            for p in (context.get('deep_excluded_from_ranking') or [])
+        ],
+        # Architecture-review item 9: an explicit funnel from raw
+        # discovery down to what actually drove the gap-analysis
+        # conclusions, so "how many papers actually informed this
+        # result" never has to be inferred from other fields.
+        'pipeline_stats': {
+            'papers_discovered': context.get('deep_stage0_total'),
+            'after_cross_source_dedup_and_shortlisting': context.get('deep_stage2_total'),
+            'verification_ran': bool(context.get('deep_verification', {}).get('verified') is not None),
+            'verified_total': context.get('deep_verification', {}).get('verified'),
+            'status_counts': context.get('deep_verification', {}).get('status_counts'),
+            'retracted_count': context.get('deep_verification', {}).get('retracted_count'),
+            'used_for_ranking_and_gap_analysis': context.get('deep_verification', {}).get('papers_used_for_ranking'),
+            'kept_but_excluded_from_ranking': context.get('deep_verification', {}).get('papers_kept_but_excluded_from_ranking'),
+            'rejected_count': len(context.get('deep_rejected_papers') or []),
+            'ranking_statuses': context.get('deep_verification', {}).get('ranking_statuses'),
+            'semantic_similarity_method': context.get('deep_verification', {})
+                                          .get('semantic_similarity', {}).get('method'),
+        },
         'authors_with_influence_data': context.get('deep_authors_with_influence_data'),
         'institutions_with_influence_data': context.get('deep_institutions_with_influence_data'),
         'top_papers': top_papers_full,
@@ -2263,6 +2767,115 @@ def deep_research():
         'analysis': context.get('deep_analysis'),
         'agent_trace': trace_to_dicts(context.get('_trace', [])),
     })
+
+# ─── Verification history endpoints ──────────────────────────────────
+# The four scores are persisted per paper per run (verification_store.py),
+# so they can be queried after the fact instead of living only in one
+# HTTP response. Every route is scoped to g.uid — a run belongs to the
+# user who produced it.
+
+def _float_arg(name):
+    raw = request.args.get(name)
+    if raw in (None, ''):
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+@app.route('/api/verification-runs', methods=['GET'])
+@require_auth
+def list_verification_runs():
+    """Every verification run this user has produced, newest first."""
+    conn = get_db()
+    try:
+        runs = verification_store.list_runs(
+            conn, g.uid,
+            limit=request.args.get('limit', 50),
+            offset=request.args.get('offset', 0),
+            mode=request.args.get('mode') or None)
+    finally:
+        conn.close()
+    return jsonify({'runs': runs, 'count': len(runs)})
+
+
+@app.route('/api/verification-runs/<int:run_id>', methods=['GET'])
+@require_auth
+def get_verification_run(run_id):
+    """One run's summary plus a per-source score breakdown."""
+    conn = get_db()
+    try:
+        run = verification_store.get_run(conn, run_id, g.uid)
+        if not run:
+            return jsonify({'error': 'Verification run not found'}), 404
+        run['per_source_stats'] = verification_store.run_score_stats(conn, run_id, g.uid)
+    finally:
+        conn.close()
+    return jsonify(run)
+
+
+@app.route('/api/verification-runs/<int:run_id>/papers', methods=['GET'])
+@require_auth
+def get_verification_run_papers(run_id):
+    """
+    Papers from one run, filterable and sortable on the real score
+    columns. Query params:
+
+      status=REJECTED|RETRACTED|OFF_TOPIC|UNVERIFIED|PARTIALLY_VERIFIED|
+             VERIFIED|HIGHLY_VERIFIED
+      publication_type=JOURNAL_ARTICLE|CONFERENCE_PAPER|PREPRINT|...
+      passed=true|false
+      min_authenticity / min_relevance / min_quality  (0-100)
+      sort=overall_score|authenticity_score|relevance_score|quality_score|
+           impact_score|verified_rank|year|citation_count
+      order=asc|desc, limit, offset
+      breakdowns=true   include the per-component score breakdowns
+
+    Rejected papers are stored and returned too — "here is what was
+    thrown out and why" is the auditable half of the filter.
+    """
+    passed_raw = request.args.get('passed')
+    passed = None if passed_raw in (None, '') else passed_raw.lower() in ('1', 'true', 'yes')
+    conn = get_db()
+    try:
+        if not verification_store.get_run(conn, run_id, g.uid):
+            return jsonify({'error': 'Verification run not found'}), 404
+        papers = verification_store.list_run_papers(
+            conn, run_id, g.uid,
+            status=request.args.get('status'),
+            publication_type=request.args.get('publication_type'),
+            passed=passed,
+            min_authenticity=_float_arg('min_authenticity'),
+            min_relevance=_float_arg('min_relevance'),
+            min_quality=_float_arg('min_quality'),
+            sort=request.args.get('sort', 'overall_score'),
+            order=request.args.get('order', 'desc'),
+            limit=request.args.get('limit', 100),
+            offset=request.args.get('offset', 0),
+            include_breakdowns=request.args.get('breakdowns', '').lower() in ('1', 'true', 'yes'))
+    finally:
+        conn.close()
+    return jsonify({'run_id': run_id, 'papers': papers, 'count': len(papers)})
+
+
+@app.route('/api/verification-history', methods=['GET'])
+@require_auth
+def get_paper_verification_history():
+    """Every verification of one DOI across this user's runs, so a score
+    that moved between runs can be traced rather than guessed at."""
+    doi = (request.args.get('doi') or '').strip()
+    if not doi:
+        return jsonify({'error': 'A doi query parameter is required'}), 400
+    doi = re.sub(r'^https?://(dx\.)?doi\.org/', '', doi, flags=re.I).lower()
+    conn = get_db()
+    try:
+        history = verification_store.paper_history(conn, doi, g.uid,
+                                                   limit=request.args.get('limit', 20))
+    finally:
+        conn.close()
+    return jsonify({'doi': doi, 'history': history, 'count': len(history)})
+
 
 # ─── Multi-paper analysis endpoint ───────────────────────────────────
 @app.route('/api/analyze-multi', methods=['POST'])
@@ -2311,13 +2924,18 @@ def analyze_multi():
         if isinstance(r.exception, ArxivUnavailableError):
             return jsonify({'error': str(r.exception), 'error_type': 'arxiv_unreachable', 'source_label': getattr(r.exception, 'source_label', 'ArXiv')}), 503
         return jsonify({'error': f'Search failed: {r.error}'}), 500
-    arxiv_papers = context['papers']
+    verify_job = _start_standard_verification(context)
 
     orchestrator.run_parallel(['keyword_agent', 'metadata_agent'], context)
+    orchestrator.run_agent('domain_classification_agent', context)
+
+    verification, rejected_papers, papers_removed = _finish_standard_verification(
+        verify_job, context, topic, g.uid)
+    if papers_removed:
+        orchestrator.run_parallel(['keyword_agent', 'metadata_agent'], context)
+    arxiv_papers = context['papers']
     keywords = context['keywords']
     metadata = context.get('metadata', [])
-
-    orchestrator.run_agent('domain_classification_agent', context)
 
     r = orchestrator.run_agent('gap_detection_agent', context)
     if not r.success:
@@ -2361,6 +2979,7 @@ def analyze_multi():
         'keywords': keywords[:25], 'metadata': metadata, 'graph': graph_data, 'year_data': year_data,
         'cat_data': cat_data, 'report_id': report_id, 'report_filename': report_filename,
         'mode': 'multi', 'analysis_id': analysis_id, 'validation': validation_result.data,
+        'verification': verification, 'rejected_papers': rejected_papers,
         'domain_classification': context.get('domain_classification'),
         'idea_description': idea_description or None,
         'primary_domain': primary_domain or None,
@@ -2369,8 +2988,9 @@ def analyze_multi():
         'agent_trace': trace_to_dicts(context.get('_trace', [])),
     })
 
+install_download_cookie(app)
 @app.route('/api/download/<filename>')
-@require_auth
+@require_auth_or_cookie
 def download_report(filename):
     # 1) Path traversal: strip any directory components (`../../etc/passwd`,
     #    absolute paths, etc.) before it ever touches the filesystem.
@@ -2720,13 +3340,13 @@ def gap_litreview():
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role":"user","content":prompt}],
-            temperature=0.3, max_tokens=1500
+            temperature=0.3, max_tokens=3500
         )
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r'^```[a-z]*\n?','',raw)
         raw = re.sub(r'\n?```$','',raw)
         raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-        return jsonify(json.loads(raw))
+        return jsonify(robust_json_loads(raw))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -2784,13 +3404,13 @@ def gap_funding():
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role":"user","content":prompt}],
-            temperature=0.2, max_tokens=1200
+            temperature=0.2, max_tokens=3000
         )
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r'^```[a-z]*\n?','',raw)
         raw = re.sub(r'\n?```$','',raw)
         raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-        return jsonify(json.loads(raw))
+        return jsonify(robust_json_loads(raw))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -2854,7 +3474,7 @@ def related_work():
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role":"user","content":prompt}],
-            temperature=0.3, max_tokens=2500
+            temperature=0.3, max_tokens=5000
         )
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r'^```[a-z]*\n?','',raw)
@@ -2862,7 +3482,7 @@ def related_work():
         # Safety net: strip any invalid backslash escapes the model still
         # produces despite instructions (e.g. stray LaTeX in math notation)
         raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-        result = json.loads(raw)
+        result = robust_json_loads(raw)
         result['bibtex_keys_note'] = 'Citation keys match the keys in your BibTeX export — download both together. Citations are in [key] format; find-and-replace with \\cite{key} for LaTeX.'
         return jsonify(result)
     except json.JSONDecodeError as e:
@@ -2896,7 +3516,7 @@ def generate_gap_brief_pdf(topic, gap, output_path):
 
     story.append(Paragraph(gap.get('gap_title',''), h2))
     conf = gap.get('confidence_score', 'N/A')
-    badge = Table([[f"{sev.upper()} PRIORITY", f"{conf}% confidence"]], colWidths=[3*inch, 3*inch])
+    badge = Table([[pdf_safe_text(f"{sev.upper()} PRIORITY"), pdf_safe_text(f"{conf}% confidence")]], colWidths=[3*inch, 3*inch])
     badge.setStyle(TableStyle([
         ('BACKGROUND',(0,0),(0,0), colors.HexColor(sev_colors.get(sev,'#999999'))),
         ('BACKGROUND',(1,0),(1,0), colors.HexColor('#0f3460')),
@@ -3544,13 +4164,13 @@ def thesis_check():
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role":"user","content":prompt}],
-            temperature=0.2, max_tokens=1200
+            temperature=0.2, max_tokens=3000
         )
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r'^```[a-z]*\n?','',raw)
         raw = re.sub(r'\n?```$','',raw)
         raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-        result = json.loads(raw)
+        result = robust_json_loads(raw)
         result['papers_checked_against'] = len(papers)
         return jsonify(result)
     except json.JSONDecodeError as e:

@@ -1,9 +1,21 @@
+cd research_gap_detector_verification_complete
+cd research_gap_detector_strict_venue_fixed_updated
 cd backend
 python -c "import secrets;print(secrets.token_urlsafe(32))"
 $env:GOOGLE_APPLICATION_CREDENTIALS = "$env:USERPROFILE\Downloads\researchlens-ai-3c90b-firebase-adminsdk-fbsvc-655afee96d.json"                                             
 $env:APP_SECRET_KEY = ""
 python app.py 
 
+cd "C:\Users\megha\Downloads\major_project\research_gap_detector_verification_complete\research_gap_detector_strict_venue_fixed_updated\backend"
+
+# Firebase credentials
+$env:GOOGLE_APPLICATION_CREDENTIALS = "$env:USERPROFILE\Downloads\researchlens-ai-3c90b-firebase-adminsdk-fbsvc-655afee96d.json"
+
+# Generate a secret key and set it in one step
+$env:APP_SECRET_KEY = python -c "import secrets;print(secrets.token_urlsafe(32))"
+
+# Run the app
+python app.py
 
 
 

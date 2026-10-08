@@ -6,8 +6,20 @@ PyPDF2==3.0.1
 networkx==3.2.1
 requests==2.31.0
 reportlab==4.1.0
+python-docx==1.1.2
 APScheduler==3.10.4
 gunicorn==21.2.0
 firebase-admin==6.5.0
 cryptography==42.0.5
 python-dotenv==1.0.1
+# Optional: real semantic-embedding similarity (semantic_similarity.py).
+# The app runs correctly WITHOUT these installed -- relevance scoring
+# falls back to TF-IDF cosine automatically and labels every score
+# 'tfidf_fallback' instead of 'sentence_transformer'. Install these two
+# to get real embedding-based semantic similarity instead of the
+# lexical fallback. Heavy (~500MB with CPU-only torch) -- skip on
+# memory-constrained deployments, or set DEEP_DISABLE_SEMANTIC_MODEL=1
+# to keep them installed but force the TF-IDF path anyway.
+sentence-transformers==2.7.0
+torch==2.3.0
+numpy==1.26.4
