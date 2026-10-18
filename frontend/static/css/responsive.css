@@ -1,0 +1,175 @@
+/* ResearchLens AI — responsive overrides.
+   Loaded LAST on every page (after style.css and each page's own <style>),
+   so these rules win at equal specificity. Breakpoints:
+   >=1600 large desktop | <=1100 small laptop | <=900 tablet | <=640 phone | <=380 small phone */
+
+/* ---------- Base: never overflow sideways, scale media ---------- */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+html, body { max-width: 100%; overflow-x: hidden; }
+img, svg, video, canvas, iframe { max-width: 100%; }
+img, video { height: auto; }
+button, a, select, input, textarea { touch-action: manipulation; }
+table { max-width: 100%; }
+.coverage-table-wrap, .table-wrap, .pe-list, .results-tabs { -webkit-overflow-scrolling: touch; }
+.coverage-table-wrap, .table-wrap { overflow-x: auto; }
+pre, code { overflow-x: auto; max-width: 100%; }
+select, input, textarea { max-width: 100%; }
+
+/* ---------- Large desktop ---------- */
+@media (min-width: 1600px) {
+  .pe-wrap, .vf-wrap { max-width: 1500px; }
+  .how-section { max-width: 1280px; }
+  .hero-features { max-width: 1100px; }
+}
+
+/* ---------- Small laptop / large tablet ---------- */
+@media (max-width: 1100px) {
+  .nav, .navbar .nav-top { padding-left: 1.5rem; padding-right: 1.5rem; }
+  .nav-tags { display: none; }
+  .upgrade-plans, .trends-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ---------- Tablet ---------- */
+@media (max-width: 900px) {
+  /* Landing page (login.html) */
+  .nav { padding: 0 1.25rem; }
+  .nav-center, .nav-status { display: none; }
+  .hero { padding: 7rem 1.5rem 3.5rem; }
+  .hero-features { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .how-section { padding: 4rem 1.5rem; }
+
+  /* App pages (index, verify, explorer, deep research) */
+  .navbar .nav-top { flex-wrap: wrap; gap: .6rem; }
+  .nav-actions { flex-wrap: wrap; justify-content: center; gap: .5rem; }
+  .input-section { grid-template-columns: 1fr !important; }
+  .wizard-flow { grid-column: 1 / -1; }
+  .ws-dashboard, .trends-row { grid-template-columns: 1fr !important; }
+  .pe-wrap, .vf-wrap { padding: 1.25rem; }
+}
+
+/* ---------- Phone ---------- */
+@media (max-width: 640px) {
+  /* ---- Landing page navbar: stop brand and Sign In overlapping ---- */
+  .nav { height: 58px; padding: 0 .9rem; gap: .5rem; }
+  .nav-brand { gap: .5rem; min-width: 0; flex: 1 1 auto; }
+  .nav-name { font-size: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .nav-right { gap: .5rem; flex: 0 0 auto; }
+  .nav-btn { padding: .45rem .85rem; font-size: .78rem; white-space: nowrap; min-height: 38px; }
+  .nav-user { padding: .25rem .5rem; }
+  .nav-user span:not(.nav-avatar) { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ---- Landing page hero ---- */
+  .hero { padding: 6rem 1.1rem 3rem; min-height: auto; }
+  .hero-badge { font-size: .62rem; letter-spacing: .06em; margin-bottom: 1.25rem; text-align: center; }
+  .hero-title { font-size: clamp(2rem, 10vw, 2.7rem); line-height: 1.08; margin-bottom: 1rem; }
+  .hero-sub { font-size: .98rem; line-height: 1.65; margin-bottom: 2rem; }
+  .hero-counters { margin-bottom: 2rem; }
+  .hc-item { padding: .85rem .4rem; }
+  .hc-num { font-size: 1.2rem; }
+  .hc-lbl { font-size: .58rem; }
+  .hero-ctas { flex-direction: column; align-items: stretch; width: 100%; max-width: 360px; margin-bottom: 2.5rem; }
+  .cta-primary, .cta-secondary { width: 100%; justify-content: center; min-height: 48px; }
+  .hero-features { grid-template-columns: 1fr; }
+  .how-section { padding: 3rem 1.1rem; }
+  .section-sub { margin-bottom: 2rem; }
+  .timeline::before { left: 22px; }
+  .tl-item { gap: .9rem; }
+  .tl-num { width: 44px; height: 44px; font-size: .9rem; }
+  .tl-body { padding: .9rem 1rem; }
+  .site-footer { padding: 1.5rem 1rem; }
+
+  /* ---- Login modal ---- */
+  .login-overlay { align-items: flex-start; overflow-y: auto; padding: 1rem 0; }
+  .login-modal { width: calc(100% - 1.5rem); padding: 1.6rem 1.15rem; margin: auto; border-radius: 20px; }
+  .otp-row { gap: .3rem; }
+  .otp-input { width: 40px; height: 48px; font-size: 1.1rem; }
+  .field-input, .btn-login, .btn-google { min-height: 46px; font-size: 16px; } /* 16px stops iOS zoom on focus */
+
+  /* ---- App pages: navbar, hero, wizard ---- */
+  .navbar .nav-top { padding: .6rem .9rem; }
+  .nav-tags { display: none; }
+  .nav-status .status-text { display: none; }
+  .brand-name { font-size: 1.05rem; white-space: nowrap; }
+  .nav-actions {
+    flex-wrap: nowrap; justify-content: flex-start; overflow-x: auto;
+    padding: .25rem .9rem .6rem; gap: .45rem; scrollbar-width: none;
+  }
+  .nav-actions::-webkit-scrollbar { display: none; }
+  .nav-pill { white-space: nowrap; flex: 0 0 auto; }
+  .hero-content { padding-left: 1rem; padding-right: 1rem; }
+  .hero-stats { flex-wrap: wrap; justify-content: center; gap: .75rem 1.25rem; }
+  .stat-divider { display: none; }
+  .hero-caption { font-size: .85rem; }
+  .hero-globe { max-width: 100vw; overflow: hidden; }
+  .scope-steps { flex-wrap: wrap; justify-content: center; gap: .5rem; padding-left: 1rem; padding-right: 1rem; }
+  .scope-step-line { display: none; }
+  .card, .glass-card, .form-card, .wizard-card, .chart-card { padding: 1rem; border-radius: 14px; }
+  .card-header { gap: .7rem; }
+  .field-input, .search-input, .qa-input { font-size: 16px; }
+  .wizard-actions { flex-direction: column-reverse; gap: .6rem; }
+  .wizard-actions button, .wizard-continue-btn, .wizard-back-btn { width: 100%; min-height: 46px; }
+  .upload-zone { padding: 1.25rem 1rem; }
+  .pe-source-row { gap: .4rem; }
+
+  /* ---- Results ---- */
+  .results-tabs { display: flex; flex-wrap: nowrap; overflow-x: auto; gap: .4rem; scrollbar-width: none; }
+  .results-tabs::-webkit-scrollbar { display: none; }
+  .rtab { flex: 0 0 auto; white-space: nowrap; }
+  .results-nav { overflow-x: auto; }
+  .upgrade-plans, .trends-grid, .metric-grid, .plan-card-grid { grid-template-columns: 1fr; }
+  .qa-input-row { flex-wrap: wrap; }
+  .qa-input-row .qa-input { flex: 1 1 100%; }
+  .qa-send-btn { width: 100%; min-height: 44px; }
+  .qa-quick-questions { flex-wrap: wrap; }
+
+  /* ---- Modals / overlays: fit the screen and scroll inside ---- */
+  .profile-modal, .upgrade-modal, .modal, .ws-modal, .proof-section {
+    width: calc(100% - 1.25rem) !important; max-width: 100% !important;
+    max-height: 92vh; max-height: 92dvh; overflow-y: auto; padding: 1.1rem;
+  }
+  .profile-overlay, .upgrade-overlay { align-items: flex-start; overflow-y: auto; padding: .6rem 0; }
+  .loading-card { padding: 1rem !important; }
+
+  /* ---- Explorer / Verify / Deep Research ---- */
+  .pe-wrap, .vf-wrap, .dr-wrap { padding: .9rem; }
+  .pe-header h1, .vf-header h1 { font-size: 1.45rem; }
+  .pe-cards { grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr)); }
+  .pe-list { max-height: none; }
+  .pe-classify-row { flex-direction: column; }
+  .pe-classify-row button { width: 100%; min-height: 44px; }
+  .pe-tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .pe-tab { flex: 0 0 auto; white-space: nowrap; }
+  .vf-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dr-row { grid-template-columns: 1fr !important; }
+  .navbar .nav-right .logout-btn { padding: .4rem .7rem; font-size: .76rem; white-space: nowrap; }
+}
+
+/* ---------- Small phones (e.g. 360px and below) ---------- */
+@media (max-width: 380px) {
+  .nav-name { font-size: .92rem; }
+  .nav-btn { padding: .4rem .7rem; font-size: .74rem; }
+  .hero-title { font-size: 1.9rem; }
+  .hc-num { font-size: 1.05rem; }
+  .otp-input { width: 36px; height: 44px; }
+  .vf-stats { grid-template-columns: 1fr; }
+}
+
+/* ---------- Short landscape phones ---------- */
+@media (max-height: 480px) and (orientation: landscape) {
+  .hero { min-height: auto; padding-top: 5rem; }
+  .login-overlay { align-items: flex-start; overflow-y: auto; }
+}
+
+/* ---------- Notches / home-indicator ---------- */
+@supports (padding: max(0px)) {
+  .nav, .navbar { padding-left: max(var(--nav-pad-l, 0px), env(safe-area-inset-left)); padding-right: max(var(--nav-pad-r, 0px), env(safe-area-inset-right)); }
+  .site-footer { padding-bottom: max(1.5rem, env(safe-area-inset-bottom)); }
+}
+
+/* ---------- Respect reduced motion; lighter effects on phones ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+@media (max-width: 640px) {
+  .orb, .o1, .o2, .o3 { filter: blur(60px); opacity: .7; max-width: 90vw; max-height: 90vw; }
+}
