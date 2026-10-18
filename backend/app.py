@@ -162,6 +162,8 @@ class Groq(_GroqBase):
                 return resp
             raise GroqQuotaExhausted(_quota_message())
         self.chat.completions.create = _create
+import groq as _groq_module
+_groq_module.Groq = Groq   # agents/chatbot import Groq after this line, so they get the quota-fallback wrapper too
 # ────────────────────────────────────────────────────────────────────────
 
 # Groq deprecated llama-3.3-70b-versatile on 2026-08-16 (see

@@ -1,0 +1,231 @@
+﻿== app.py 20-175 (fallback wrapper) ==
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
+from groq import Groq
+
+# ── Groq reliability wrapper (v3) ───────────────────────────────────────
+# 1) JSON replies: JSON mode + short reasoning + token headroom + one retry
+#    (fixes "Unterminated string" / "Expecting ',' delimiter").
+# 2) QUOTA: Groq's free tier gives each model a daily token budget (TPD,
+#    200,000 for gpt-oss-120b). When a model is out of tokens (or briefly
+#    over its per-minute limit) the call is retried / moved to the next model
+#    in GROQ_FALLBACK_MODELS (each model has its OWN daily budget), instead of
+#    every batch failing. If every model is exhausted a clear
+#    GroqQuotaExhausted error is raised (and the analysis stops early rather
+#    than firing dozens of doomed calls).
+import re as _re_fix, json as _json_fix, time as _time_fix, threading as _thr_fix
+_GroqBase = Groq
+
+class GroqQuotaExhausted(Exception):
+    pass
+
+_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
+    'GROQ_FALLBACK_MODELS',
+    'openai/gpt-oss-20b,meta-llama/llama-4-scout-17b-16e-instruct,llama-3.1-8b-instant'
+).split(',') if m.strip()]
+_model_blocked_until = {}
+_model_lock = _thr_fix.Lock()
+
+def _parse_wait_seconds(msg):
+    m = _re_fix.search(r'try again in (?:(\d+)h)?(?:(\d+)m(?!s))?(?:([\d.]+)s)?', msg or '')
+    if not m or not any(m.groups()):
+        return None
+    h, mi, sec = m.groups()
+    return int(h or 0) * 3600 + int(mi or 0) * 60 + float(sec or 0)
+
+def _block_model(model, seconds):
+    with _model_lock:
+        _model_blocked_until[model] = _time_fix.time() + max(30.0, float(seconds or 600))
+
+def _quota_message():
+    with _model_lock:
+        waits = [t - _time_fix.time() for t in _model_blocked_until.values() if t > _time_fix.time()]
+    mins = int(min(waits) // 60) + 1 if waits else 10
+    return ("Groq token quota is used up on every configured model (free-tier daily limit). "
+            f"It frees up again in about {mins} min. To keep going now: wait, set another "
+            "GROQ_MODEL / GROQ_FALLBACK_MODELS in backend/.env, or upgrade the Groq plan.")
+
+def _reply_is_valid_json(text):
+    t = (text or '').strip()
+    t = _re_fix.sub(r'^```[a-z]*\n?', '', t)
+    t = _re_fix.sub(r'\n?```$', '', t)
+    t = _re_fix.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', t)
+    try:
+        _json_fix.loads(t)
+        return True
+    except Exception:
+        return False
+
+def _try_model(orig_create, a, k, model):
+    """One model: returns a response, or None meaning 'move on to the next model'."""
+    tpm_waits = 0
+    json_dropped = False
+    while True:
+        try:
+            return orig_create(*a, **k)
+        except Exception as e:
+            msg = str(e); low = msg.lower(); status = getattr(e, 'status_code', None)
+            if status == 429 or 'rate limit' in low or 'rate_limit_exceeded' in low:
+                wait = _parse_wait_seconds(msg)
+                daily = ('per day' in low) or ('(tpd)' in low) or ('(rpd)' in low)
+                if daily or (wait is not None and wait > 45) or tpm_waits >= 2:
+                    _block_model(model, wait or 600)
+                    print(f'[groq] {model}: out of quota (retry in ~{int((wait or 600)//60)} min) — trying next model')
+                    return None
+                tpm_waits += 1
+                _time_fix.sleep(min((wait or 6) + 1, 30))
+                continue
+            if status == 404 or 'model_not_found' in low or 'does not exist' in low \
+                    or 'decommissioned' in low or ('model' in low and 'not found' in low):
+                _block_model(model, 86400)
+                print(f'[groq] {model}: not available on this account — skipping it')
+                return None
+            if status == 413 or 'request too large' in low or 'reduce your message size' in low:
+                print(f'[groq] {model}: request too large for this model — trying next model')
+                return None
+            if 'response_format' in k and not json_dropped and (status == 400 or 'json' in low):
+                json_dropped = True
+                k = dict(k)
+                k.pop('response_format', None)
+                k['max_tokens'] = min(4000, int(k.get('max_tokens') or 1500) + 1000)
+                print(f'[groq] {model}: JSON mode rejected ({msg[:90]}) — retrying without it')
+                continue
+            raise
+
+class Groq(_GroqBase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _orig_create = self.chat.completions.create
+
+        def _create(*a, **kw):
+            if kw.get('stream'):
+                return _orig_create(*a, **kw)
+            base_model = kw.get('model', '')
+            req = int(kw.get('max_tokens') or 0)
+            if 0 < req <= 2500:
+                kw['max_tokens'] = min(4000, req + 1500)
+            wants_json = 'json' in ' '.join(
+                str(m.get('content', '')) for m in (kw.get('messages') or [])).lower()
+            if wants_json and 'response_format' not in kw:
+                kw['response_format'] = {'type': 'json_object'}
+            now = _time_fix.time()
+            chain = [base_model] + [m for m in _FALLBACK_MODELS if m != base_model]
+            live = [m for m in chain if _model_blocked_until.get(m, 0) <= now]
+            for model in live:
+                k = dict(kw)
+                k['model'] = model
+                eb = dict(k.get('extra_body') or {})
+                if 'gpt-oss' in model:
+                    eb.setdefault('reasoning_effort', 'low')
+                else:
+                    eb.pop('reasoning_effort', None)
+                if eb:
+                    k['extra_body'] = eb
+                else:
+                    k.pop('extra_body', None)
+                resp = _try_model(_orig_create, a, k, model)
+                if resp is None:
+                    continue
+                if model != base_model:
+                    print(f'[groq] served by fallback model {model}')
+                if wants_json:
+                    try:
+                        ok = _reply_is_valid_json(resp.choices[0].message.content)
+                    except Exception:
+                        ok = True
+                    if not ok:
+                        print('[groq-json] reply was not valid JSON — retrying once')
+                        k2 = dict(k)
+                        k2['temperature'] = 0.1
+                        k2['max_tokens'] = min(4000, int(k.get('max_tokens') or 1500) + 1000)
+                        retry = _try_model(_orig_create, a, k2, model)
+                        if retry is not None:
+                            resp = retry
+                return resp
+            raise GroqQuotaExhausted(_quota_message())
+        self.chat.completions.create = _create
+# ────────────────────────────────────────────────────────────────────────
+
+# Groq deprecated llama-3.3-70b-versatile on 2026-08-16 (see
+# https://console.groq.com/docs/deprecations); openai/gpt-oss-120b is
+# their recommended production-tier replacement. Configurable via env
+# var so the next deprecation is a one-line fix, not a find-and-replace.
+GROQ_MODEL = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-120b')
+from werkzeug.utils import secure_filename
+from auth import require_auth
+from crypto_utils import encrypt_secret, decrypt_secret
+from agents import (
+== app.py 3490-3530 (proposal route) ==
+    data = request.get_json(silent=True) or {}
+    api_key = data.get('api_key', '').strip()
+    idea = data.get('idea', '').strip()
+    analysis_id = data.get('analysis_id')
+    if not idea or not analysis_id:
+        return jsonify({'error': 'idea and analysis_id are required'}), 400
+    saved = _get_owned_analysis(analysis_id, g.uid)
+    if not saved:
+        return jsonify({'error': 'Analysis not found'}), 404
+    context = {'api_key': api_key, 'idea': idea, 'papers': saved['papers']}
+    r = orchestrator.run_agent('novelty_agent', context)
+    if not r.success:
+        return jsonify({'error': f'Novelty check failed: {r.error}'}), 500
+    return jsonify({**r.data, 'agent_explanation': r.explanation})
+
+
+@app.route('/api/agents/proposal', methods=['POST'])
+@require_auth
+def agent_proposal():
+    """Research Proposal Agent — generates a structured proposal from a chosen gap."""
+    data = request.get_json(silent=True) or {}
+    api_key = data.get('api_key', '').strip()
+    analysis_id = data.get('analysis_id')
+    gap_index = data.get('gap_index')
+    if not api_key or not analysis_id:
+        return jsonify({'error': 'api_key and analysis_id are required'}), 400
+    saved = _get_owned_analysis(analysis_id, g.uid)
+    if not saved:
+        return jsonify({'error': 'Analysis not found'}), 404
+    gaps = saved['analysis'].get('research_gaps', [])
+    gap = gaps[gap_index] if isinstance(gap_index, int) and 0 <= gap_index < len(gaps) else {}
+    context = {'api_key': api_key, 'topic': saved['topic'], 'gap': gap}
+    r = orchestrator.run_agent('proposal_agent', context)
+    if not r.success:
+        return jsonify({'error': f'Proposal generation failed: {r.error}'}), 500
+    return jsonify({'proposal': r.data, 'agent_explanation': r.explanation})
+
+
+@app.route('/api/agents/experiment', methods=['POST'])
+@require_auth
+def agent_experiment():
+    """Experiment Recommendation Agent — datasets, metrics, and baselines for a gap."""
+== proposal agent ==
+app.py:113: class Groq(_GroqBase):
+app.py:1464: def analyze_gaps_with_groq(api_key, topic, pdf_text, papers, keywords, primary_domain=None):
+app.py:1465: client = Groq(api_key=api_key)
+app.py:1476: result = _analyze_gaps_batch_with_groq(client, topic, pdf_excerpt, batch, kw_str, theme=theme, n_gaps=n_ask)
+app.py:1508: extra = _analyze_gaps_batch_with_groq(client, topic, pdf_excerpt, batch, kw_str, theme=theme,
+app.py:1538: def _analyze_gaps_batch_with_groq(client, topic, pdf_excerpt, papers, kw_str, theme='', n_gaps=6, exclude_titles=None):
+app.py:1620: def analyze_multiple_papers_with_groq(api_key, topic, papers_data, arxiv_papers, keywords, primary_domain=None):
+app.py:1621: client = Groq(api_key=api_key)
+app.py:1717: def analyze_domain_understanding_with_groq(api_key, topic, domain=None, sub_domain=None,
+app.py:1731: client = Groq(api_key=api_key)
+app.py:1768: def forecast_research_trends_with_groq(api_key, topic, trend_stats, current_trends=None):
+app.py:1785: client = Groq(api_key=api_key)
+app.py:1847: def analyze_deep_research_gaps_with_groq(api_key, topic, papers, trend_stats, current_trends=None, forecast=None,
+app.py:1883: client = Groq(api_key=api_key)
+app.py:1895: result = _analyze_deep_gaps_batch_with_groq(
+app.py:1921: def _analyze_deep_gaps_batch_with_groq(client, topic, all_papers, top_evidence, trend_stats, current_trends, forecast, line_fn):
+app.py:3508: def agent_proposal():
+app.py:3612: client = Groq(api_key=api_key)
+app.py:3630: client = Groq(api_key=api_key)
+app.py:3684: client = Groq(api_key=api_key)
+app.py:3764: client = Groq(api_key=api_key)
+app.py:4022: analysis = analyze_gaps_with_groq(api_key, topic, "", papers, keywords)
+app.py:4463: client = Groq(api_key=api_key)
+chatbot.py:803: return Groq(api_key=api_key, timeout=60.0, max_retries=2)
+full_text_analysis.py:165: def analyze_paper_full_text_with_groq(api_key, paper, full_text, groq_model, max_chars=MAX_TEXT_CHARS):
+full_text_analysis.py:173: client = Groq(api_key=api_key)
+full_text_analysis.py:199: def analyze_paper_from_abstract_with_groq(api_key, paper, groq_model):
+full_text_analysis.py:211: client = Groq(api_key=api_key)
+full_text_analysis.py:246: extracted = analyze_paper_full_text_with_groq(api_key, paper, text, groq_model)
+full_text_analysis.py:256: extracted = analyze_paper_from_abstract_with_groq(api_key, paper, groq_model)

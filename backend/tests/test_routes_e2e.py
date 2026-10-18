@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import auth
 auth._init_firebase = lambda: None
-auth.firebase_auth.verify_id_token = lambda tok: {'uid': 'u-test', 'email': 't@example.com'}
+auth.firebase_auth.verify_id_token = lambda tok, **kw: {'uid': 'u-test', 'email': 't@example.com'}
 
 import app as appmod
 import deep_collection as dc
