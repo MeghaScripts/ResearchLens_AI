@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
@@ -38,7 +39,7 @@ jobs:
         env:
           APP_SECRET_KEY: ci-test-secret
           FIREBASE_SERVICE_ACCOUNT_JSON: "{}"
-        run: python -m pytest tests -q -p no:cacheprovider
+        run: python -m pytest tests -v --tb=short -rfE -p no:cacheprovider
 
   docker:
     needs: test
