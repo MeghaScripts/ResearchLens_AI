@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, send_file, send_from_directory, g
 from flask_cors import CORS
 import sys, os, json, re, requests, time, sqlite3, threading, xml.etree.ElementTree as ET
+import groq_json
 import jobs
 
 # Loads backend/.env (see .env.example) into os.environ before anything
@@ -699,6 +700,31 @@ def _fetch_arxiv_for_multi(topic, max_results, offset=0):
     return papers
 
 
+_VENUE_ALIASES = {
+    'aaai': ['aaai', 'association for the advancement of artificial intelligence'],
+    'neurips': ['neurips', 'nips', 'neural information processing systems'],
+    'icml': ['icml', 'international conference on machine learning'],
+    'iclr': ['iclr', 'international conference on learning representations'],
+    'cvpr': ['cvpr', 'computer vision and pattern recognition'],
+    'iccv': ['iccv', 'international conference on computer vision'],
+    'eccv': ['eccv', 'european conference on computer vision'],
+}
+
+
+def _venue_matches(venue_text, wanted):
+    """True if a paper's venue string matches any wanted venue, by short name,
+    alias or full conference name (case-insensitive substring)."""
+    v = (venue_text or '').lower()
+    if not v:
+        return False
+    for w in wanted or []:
+        key = (w or '').strip().lower()
+        if not key:
+            continue
+        if any(alias in v for alias in _VENUE_ALIASES.get(key, [key])):
+            return True
+    return False
+
 def fetch_papers_multi_source(topic, max_results=50, sources=None, venue_filter=None):
     """
     Combines ArXiv + Semantic Scholar + OpenAlex into one deduplicated result
@@ -791,6 +817,7 @@ def fetch_papers_multi_source(topic, max_results=50, sources=None, venue_filter=
                 continue
             (dblp_venues if v_clean in DBLP_VENUE_STREAMS else fallback_venues).append(v_clean)
 
+        empty_venues = []
         for i, v in enumerate(dblp_venues):
             if i > 0:
                 time.sleep(2.5)  # polite gap — DBLP resets connections on bursts
@@ -801,10 +828,17 @@ def fetch_papers_multi_source(topic, max_results=50, sources=None, venue_filter=
                 if papers:
                     print(f"{name} OK: {len(papers)} papers")
                 else:
-                    errors.append(f"{name}: no results/unreachable")
+                    # DBLP answered fine (a real failure raises below) but
+                    # no title in this venue matched the topic words.
+                    empty_venues.append(v)
+                    print(f"{name}: reachable, 0 papers matched '{topic}'")
             except Exception as e:
                 errors.append(f"{name}: {e}")
                 print(f"{name} failed: {e}")
+
+        _dblp_failed = [v for v in dblp_venues if any(e.startswith(f'{v} (via DBLP):') for e in errors)]
+
+        fallback_venues = list(fallback_venues) + _dblp_failed
 
         if fallback_venues:
             name = 'Semantic Scholar'
@@ -851,10 +885,18 @@ def fetch_papers_multi_source(topic, max_results=50, sources=None, venue_filter=
             combined = [
                 p for p in combined
                 if p.get('source') not in ('Semantic Scholar', 'OpenAlex')
-                or any(wv in (p.get('venue') or '').lower() for wv in wanted_venues)
+                or _venue_matches(p.get('venue'), fallback_venues)
             ]
         if not combined:
             venues_label = ', '.join(venue_filter)
+            if empty_venues and not errors:
+                raise ArxivUnavailableError(
+                    f"{', '.join(empty_venues)} responded normally, but no papers there "
+                    f"matched \"{topic}\". DBLP only matches words in titles, so try a "
+                    "shorter or more specific topic (e.g. \"neural networks\", "
+                    "\"reinforcement learning\").",
+                    source_label=venues_label,
+                )
             if errors:
                 raise ArxivUnavailableError(
                     f"Couldn't fetch results for {venues_label}: {'; '.join(errors)}. "
@@ -1473,6 +1515,18 @@ def analyze_gaps_with_groq(api_key, topic, pdf_text, papers, keywords, primary_d
         merged["research_gaps"].extend(extra.get("research_gaps", []))
         merged["research_gaps"] = _dedupe_gaps(merged["research_gaps"])
     print(f"[gap-analysis] final: {len(merged['research_gaps'])} gaps (target {GAPS_TARGET})")
+
+    _kept_g, _rej_g = paper_quality.ground_gaps(merged["research_gaps"], papers)
+    if _kept_g:
+        merged["research_gaps"] = _kept_g
+    merged["grounding"] = {
+        "kept": len(merged["research_gaps"]),
+        "rejected": len(_rej_g),
+        "rejected_gaps": _rej_g[:25],
+        "all_rejected_kept_unfiltered": (not _kept_g) and bool(_rej_g),
+    }
+    if _rej_g:
+        print(f"[gap-analysis] grounding removed {len(_rej_g)} gap(s) not backed by collected papers")
 
     merged["existing_coverage"] = merged["existing_coverage"][:12]
     merged["emerging_trends"] = merged["emerging_trends"][:12]
@@ -2230,13 +2284,12 @@ STANDARD_VERIFY_TIMEOUT_S = float(_STD_TIMEOUT_ENV or '40')   # base value; see 
 
 
 def _std_verify_timeout(n_papers):
-    """An explicit STANDARD_VERIFY_TIMEOUT_S wins; otherwise scale with corpus size so a
-    500-paper run isn't abandoned after 40s (40s + 0.2s per paper, max 150s)."""
+    """Seconds to wait for standard verification. An explicit
+    STANDARD_VERIFY_TIMEOUT_S env var wins; otherwise the base value grows
+    with corpus size, capped at 10 minutes."""
     if _STD_TIMEOUT_ENV:
-        return STANDARD_VERIFY_TIMEOUT_S
-    # was min(150, 40 + 0.2n): a 500-paper run was abandoned after 126s, before the
-    # registry checks could finish. Wait up to 10 min; progress is shown live meanwhile.
-    return min(600.0, 240.0 + 0.5 * max(0, n_papers))
+        return float(_STD_TIMEOUT_ENV)
+    return min(600.0, float(STANDARD_VERIFY_TIMEOUT_S) + 0.5 * max(0, int(n_papers)))
 
 _verify_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='std-verify')
 
@@ -3598,7 +3651,7 @@ def gap_litreview():
         raw = re.sub(r'^```[a-z]*\n?','',raw)
         raw = re.sub(r'\n?```$','',raw)
         raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-        return jsonify(json.loads(raw))
+        return jsonify(groq_json.parse_llm_json(raw))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -3662,7 +3715,7 @@ def gap_funding():
         raw = re.sub(r'^```[a-z]*\n?','',raw)
         raw = re.sub(r'\n?```$','',raw)
         raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-        return jsonify(json.loads(raw))
+        return jsonify(groq_json.parse_llm_json(raw))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

@@ -691,6 +691,9 @@ DBLP_VENUE_STREAMS = {
     'NeurIPS': 'conf/nips',   # DBLP kept the historical NIPS stream id
     'ICML': 'conf/icml',
     'ICLR': 'conf/iclr',
+    'CVPR': 'conf/cvpr',
+    'ICCV': 'conf/iccv',
+    'ECCV': 'conf/eccv',
 }
 
 
@@ -804,9 +807,9 @@ def _dblp_paper(venue_name, title, year, authors, doi, key, venue=None):
     }
 
 
-def _dblp_via_sparql(topic, venue_name, stream, max_results, first):
-    q = _dblp_sparql_query(stream, _dblp_topic_terms(topic),
-                           min(max_results, 100), max(0, first))
+def _dblp_run_sparql(venue_name, stream, terms, limit, offset):
+    """One SPARQL query for one set of title terms (ALL must match)."""
+    q = _dblp_sparql_query(stream, terms, limit, offset)
     data = _dblp_request_json('POST', DBLP_SPARQL_URL, data={'query': q},
                               accept='application/sparql-results+json')
     papers = []
@@ -822,6 +825,45 @@ def _dblp_via_sparql(topic, venue_name, stream, max_results, first):
         key = val('paper').replace('https://dblp.org/rec/', '')
         papers.append(_dblp_paper(venue_name, title, val('year'), authors, doi, key))
     return papers
+
+
+def _dblp_via_sparql(topic, venue_name, stream, max_results, first):
+    """
+    DBLP matching is literal: every topic term must appear in the title.
+    A natural-language topic ("Artificial Intelligence", or a topic plus an
+    idea description) can therefore legitimately match ZERO papers in a
+    venue even though DBLP is healthy. When the all-terms query is empty
+    (first page only), fall back to the longest terms one at a time and
+    merge the results. Every paper returned is still a real DBLP record
+    from that venue's stream; relevance scoring downstream decides what is
+    actually on-topic.
+    """
+    terms = _dblp_topic_terms(topic)
+    limit = min(max_results, 100)
+    papers = _dblp_run_sparql(venue_name, stream, terms, limit, max(0, first))
+    if papers or first > 0 or len(set(terms)) < 2:
+        return papers
+
+    merged, seen = [], set()
+    for t in sorted(set(terms), key=len, reverse=True)[:3]:
+        time.sleep(1.0)   # be polite to the public endpoint
+        try:
+            got = _dblp_run_sparql(venue_name, stream, [t], limit, 0)
+        except Exception:
+            if merged:
+                break      # keep what we already have
+            raise
+        for p in got:
+            k = p.get('dblp_key') or p['title'].lower()
+            if k not in seen:
+                seen.add(k)
+                merged.append(p)
+        if len(merged) >= limit:
+            break
+    if merged:
+        print(f"{venue_name} (via DBLP): no title contained all of {terms}; "
+              f"used single-term fallback, {len(merged)} papers")
+    return merged[:limit]
 
 
 def _dblp_via_legacy_search(topic, venue_name, stream, max_results, first):
