@@ -27,10 +27,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: requirements.txt
-      - name: Install dependencies (optional heavy ML packages skipped; app falls back to TF-IDF)
+      - name: Install dependencies (heavy ML packages skipped; app falls back to TF-IDF)
         run: |
           python -m pip install --upgrade pip
-          grep -viE '^(sentence-transformers|torch|numpy)==' requirements.txt > requirements.ci.txt
+          grep -viE '^(sentence-transformers|torch)==' requirements.txt > requirements.ci.txt
           pip install -r requirements.ci.txt pytest
       - name: Syntax check
         run: python -m compileall -q backend
