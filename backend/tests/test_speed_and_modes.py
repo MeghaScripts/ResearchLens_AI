@@ -18,6 +18,8 @@ os.environ['DB_PATH'] = os.path.join(_tmp, 'test.db')
 os.environ['STORAGE_BASE'] = _tmp
 os.environ.setdefault('FIREBASE_SERVICE_ACCOUNT_JSON', '{}')
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# `tests/` is not a package, so sibling test modules are imported by plain name.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import random
 import string
@@ -158,7 +160,7 @@ def test_arxiv_lowercase_label_is_an_authorized_source():
 
 def test_standard_verification_drops_only_rejected_and_labels_rest():
     import app as appmod
-    import tests.test_verification_smoke as smoke
+    import test_verification_smoke as smoke
     smoke._offline_stubs()
     appmod.STANDARD_VERIFY_TIMEOUT_S = 20
     papers = [

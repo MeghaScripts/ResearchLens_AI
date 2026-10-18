@@ -81,5 +81,7 @@ def test_endpoints_return_200_when_model_output_is_messy(monkeypatch):
     h = {'Authorization': 'Bearer x'}
     r1 = c.post('/api/gap-litreview', json={'api_key': 'k', 'gap_title': 'g'}, headers=h)
     r2 = c.post('/api/gap-funding', json={'api_key': 'k', 'gap_title': 'g'}, headers=h)
+    print("R1:", r1.status_code, r1.get_json())
+    print("R2:", r2.status_code, r2.get_json())
     assert r1.status_code == 200 and r1.json['comparison_table'][0]['paper'] == 'A'
     assert r2.status_code == 200 and r2.json['funding_fit'][0]['body'] == 'NSF'

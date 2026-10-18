@@ -27,7 +27,7 @@ auth.firebase_auth.verify_id_token = lambda tok: {'uid': 'u-test', 'email': 't@e
 
 import app as appmod
 import deep_collection as dc
-import tests.test_verification_smoke as smoke
+import test_verification_smoke as smoke
 smoke._offline_stubs()
 dc.backfill_citation_counts = lambda papers, batch_size=500, budget=None: 0
 dc.enrich_with_venue_influence = lambda papers: papers

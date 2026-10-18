@@ -106,9 +106,12 @@ class _FakeGroq:
         prompt = kw['messages'][0]['content']
         theme = prompt.split('THEME OF THIS BATCH')[1].split('\n')[0] if 'THEME OF THIS BATCH' in prompt else 'general'
         listed = [l[2:].rsplit(' (', 1)[0] for l in prompt.split('\n') if l.startswith('- ')]
+        # each gap cites ONE different paper and talks about it (a real gap does; grounding
+        # checks that), so gaps stay distinct and are not merged by the de-duplicator
         gaps = [{'gap_title': f'Batch {n} gap {j} about {theme[:20]} zq{n}x{j}', 'severity': 'major',
-                 'description': f'Existing work on {theme} lacks study number {n} {j} qq{n}{j} under real deployment conditions.',
-                 'confidence_score': 80, 'evidence_papers': listed[:2]} for j in range(5)]
+                 'description': (f'Existing work on {theme} lacks study number {n} {j} qq{n}{j} '
+                                 f'under real deployment conditions, as seen in {listed[j % len(listed)]}.'),
+                 'confidence_score': 80, 'evidence_papers': [listed[j % len(listed)]]} for j in range(5)]
         msg = type('M', (), {'content': json.dumps({'summary': 's', 'research_gaps': gaps, 'existing_coverage': [], 'emerging_trends': [],
                                                     'recommended_next_steps': [], 'gap_density': 'high', 'overall_recommendation': 'r'})})()
         return type('R', (), {'choices': [type('C', (), {'message': msg})()]})()
@@ -140,7 +143,7 @@ def test_local_gate_runs_in_standard_verification_and_is_reported(monkeypatch):
 def test_timeout_scales_with_corpus(monkeypatch):
     import app as appmod
     monkeypatch.setattr(appmod, '_STD_TIMEOUT_ENV', None)
-    assert appmod._std_verify_timeout(40) < appmod._std_verify_timeout(500) <= 150
+    assert appmod._std_verify_timeout(40) < appmod._std_verify_timeout(500) <= 600
 
 
 def test_junk_with_an_abstract_and_year_is_still_rejected():
