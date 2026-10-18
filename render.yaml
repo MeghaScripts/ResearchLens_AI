@@ -5,7 +5,7 @@ services:
     region: singapore
     plan: free
     buildCommand: grep -viE '^(sentence-transformers|torch|numpy)==' requirements.txt > requirements.render.txt && pip install -r requirements.render.txt
-    startCommand: gunicorn --chdir backend app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 300
+    startCommand: gunicorn --chdir backend app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 300
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0

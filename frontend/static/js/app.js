@@ -357,14 +357,28 @@ function renderLivePapers(count, sample) {
  * catch and route that through the exact same error UI as before. */
 function pollAnalyzeJob(jobId) {
   return new Promise((resolve, reject) => {
+    let misses = 0;     // consecutive "job not found" answers
+    let netFails = 0;   // consecutive network / gateway errors (server waking up or restarting)
     const poll = async () => {
       try {
         const resp = await fetch(`/api/analyze/status/${jobId}`);
-        const job = await resp.json();
+        let job = {};
+        try { job = await resp.json(); } catch (_) { /* HTML loading page while the server wakes up */ }
+        if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
+          if (++netFails <= 20) { loadingTimer = setTimeout(poll, 3000); return; }
+          reject({ pipelineError: true, status: resp.status, payload: { error: 'The server is not responding. Please wait a minute and try again.' } });
+          return;
+        }
+        if (resp.status === 404) {
+          if (++misses <= 3) { loadingTimer = setTimeout(poll, 1500); return; }
+          reject({ pipelineError: true, status: 404, payload: { error: 'Your analysis was interrupted because the server restarted. Please click Analyze again.' } });
+          return;
+        }
         if (!resp.ok) {
           reject({ pipelineError: true, status: resp.status, payload: job });
           return;
         }
+        misses = 0; netFails = 0;
         renderLiveSteps(job.steps || []);
         renderLivePapers(job.papers_count, job.papers_sample || []);
         if (job.status === 'done') {
@@ -375,6 +389,7 @@ function pollAnalyzeJob(jobId) {
           loadingTimer = setTimeout(poll, 1200);
         }
       } catch (err) {
+        if (++netFails <= 20) { loadingTimer = setTimeout(poll, 3000); return; }
         reject(err);
       }
     };
