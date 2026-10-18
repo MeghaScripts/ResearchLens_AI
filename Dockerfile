@@ -1,5 +1,5 @@
 # ResearchLens AI - production image.  Build:  docker build -t researchlens .
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 ARG APP_COMMIT=""
 ENV APP_COMMIT=${APP_COMMIT} PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 \
