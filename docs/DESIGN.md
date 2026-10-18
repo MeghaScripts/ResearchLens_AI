@@ -174,9 +174,9 @@ flowchart LR
   GH --> CI[Actions: test + docker smoke]
   CI -->|main, deploy hook| R[Render web service: gunicorn]
   GH -->|tag vX.Y.Z| REL[Release workflow] --> GHCR[(ghcr.io image)] --> ANY[Any Docker host]
-  R --> HC[/health check/]
+  R --> HC["/health check"]
   R --> LOGS[Request logs with request id]
-  R --> MET[/metrics -> Prometheus/Grafana optional/]
+  R --> MET["/metrics, Prometheus/Grafana optional"]
   R -.optional.-> SEN[Sentry]
 ```
 Operational endpoints are public except `/metrics`, which can be protected with `METRICS_TOKEN`.

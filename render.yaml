@@ -15,5 +15,9 @@ services:
         generateValue: true
       - key: LOG_LEVEL
         value: INFO
+      - key: GAPS_TARGET
+        value: "15"
+      - key: MAX_GAP_BATCHES
+        value: "3"
     healthCheckPath: /health
     autoDeploy: true

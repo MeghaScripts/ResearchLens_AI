@@ -148,13 +148,13 @@ Priority H/M/L; status Done or Planned.
 sequenceDiagram
   participant U as Product Owner
   participant D as Developer
-  U->>D: Screenshot: junk papers in workspace; 500 papers gave only ~10 gaps
-  D->>D: Diagnose root causes (only REJECTED removed; top-40 verified; cap 15; prefix dedupe)
+  U->>D: Screenshot: junk papers in workspace, 500 papers gave only ~10 gaps
+  D->>D: Diagnose root causes (only REJECTED removed, top-40 verified, cap 15, prefix dedupe)
   D->>U: Increment 1: quality gate + themed batches + dedupe (tests pass)
   U->>D: Review on real topic "AI": junk titles still listed
   D->>D: Find live list built before gate
   D->>U: Increment 2: refresh live list, stricter junk rules
-  U->>D: Accept; ask for SRS/design/test plan
+  U->>D: Accept, ask for SRS/design/test plan
 ```
 
 ## 6. Quality practices inside the Agile loop
@@ -180,10 +180,10 @@ Continuous integration and delivery close the loop from commit to running servic
 
 ```mermaid
 flowchart LR
-  C[Commit / PR] --> CI[GitHub Actions: compile + pytest on Python 3.11 and 3.12]
-  CI --> DK[Docker build + /health smoke test]
-  DK --> CD[Deploy hook -> Render]
-  CD --> MON[/health /ready /metrics + logs]
+  C[Commit / PR] --> CI["GitHub Actions: compile + pytest on Python 3.11 and 3.12"]
+  CI --> DK["Docker build + /health smoke test"]
+  DK --> CD["Deploy hook to Render"]
+  CD --> MON["/health, /ready, /metrics + logs"]
   MON -->|incident, feedback| B[Backlog]
   TAG[git tag vX.Y.Z] --> REL[Release workflow: tests, image to GHCR, GitHub Release]
 ```

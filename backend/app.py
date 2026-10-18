@@ -61,7 +61,7 @@ def _quota_message():
     mins = int(min(waits) // 60) + 1 if waits else 10
     return ("Groq token quota is used up on every configured model (free-tier daily limit). "
             f"It frees up again in about {mins} min. To keep going now: wait, set another "
-            "GROQ_MODEL / GROQ_FALLBACK_MODELS in backend/.env, or upgrade the Groq plan.")
+            "use a different Groq API key (limits are per Groq account), or upgrade the Groq plan.")
 
 def _reply_is_valid_json(text):
     t = (text or '').strip()
