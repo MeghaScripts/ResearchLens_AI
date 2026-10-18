@@ -200,6 +200,8 @@
 <script type="module">
   import '/static/js/firebase-auth.js';
   await window.rlAuth.requireAuth();
+  window.rlAuthIsReady = true;
+  document.dispatchEvent(new Event('rl-auth-ready'));
 </script>
 <script>
 const STAGES = [

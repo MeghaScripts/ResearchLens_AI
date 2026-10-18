@@ -6,6 +6,14 @@
 <title>ResearchLens AI — Gap Detection System</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="/static/css/style.css"/>
+<style>
+  /* Loading screen: the whole overlay scrolls, and the step list / papers box
+     scroll inside their own areas instead of running off the screen. */
+  .loading-overlay{align-items:flex-start;overflow-y:auto;padding:1.5rem 1rem;box-sizing:border-box}
+  .loading-card{margin:auto;width:min(1100px,100%);box-sizing:border-box;padding:1.5rem 2rem}
+  .loading-card #livePapersBox{max-height:22vh}
+  .loading-card .loading-steps{max-height:42vh;overflow-y:auto;padding-right:0.5rem}
+</style>
 </head>
 <body>
 <div class="bg-grid"></div>
@@ -15,7 +23,8 @@
 
 <!-- NAVBAR -->
 <nav class="navbar">
-  <div class="nav-brand">
+  <div class="nav-top">
+    <div class="nav-brand">
     <div class="brand-icon">
       <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
         <circle cx="14" cy="14" r="5" fill="#00d4ff"/>
@@ -30,30 +39,32 @@
     </div>
     <span class="brand-name">ResearchLens<span class="brand-ai"> AI</span></span>
   </div>
-  <div class="nav-tags">
-    <span class="tag"><svg class="nb-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.7 1.8L21.5 17.5l-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7z"/></svg>Agentic AI</span>
-    <span class="tag"><svg class="nb-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.2"/><circle cx="5" cy="19" r="2.2"/><circle cx="19" cy="19" r="2.2"/><path d="M11 7l-5 10M13 7l5 10M7.2 19h9.6"/></svg>Knowledge Graph</span>
-    <span class="tag"><svg class="nb-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4M9.5 10.5l2 2 3.5-4"/></svg>Gap Detection</span>
+    <div class="nav-tags">
+    <span class="tag">Agentic AI</span>
+    <span class="tag">Knowledge Graph</span>
+    <span class="tag">Gap Detection</span>
   </div>
-  <div class="nav-right">
-    <div class="user-info" id="userInfo" style="display:none;cursor:pointer" onclick="openProfile()">
-      <img class="user-avatar" id="userAvatar" src="" alt="" style="cursor:pointer"/>
-      <span class="user-name" id="userName" style="cursor:pointer"></span>
-      <span class="profile-arrow">▾</span>
+    <div class="nav-right">
+      <div class="user-info" id="userInfo" style="display:none;cursor:pointer" onclick="openProfile()">
+        <img class="user-avatar" id="userAvatar" src="" alt="" style="cursor:pointer"/>
+        <span class="user-name" id="userName" style="cursor:pointer"></span>
+        <span class="profile-arrow">▾</span>
+      </div>
+      <div class="nav-status">
+        <span class="status-dot"></span>
+        <span class="status-text">System Ready</span>
+      </div>
     </div>
-    <div class="nav-status">
-      <span class="status-dot"></span>
-      <span class="status-text">System Ready</span>
-    </div>
-    <button class="nav-icon-btn" title="Profile &amp; settings" aria-label="Profile and settings" onclick="openProfile()"><svg class="nb-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   </div>
-  <div class="nav-menu">
-    <button class="nav-pill np-purple" onclick="openWorkspaceModal()"><svg class="nb-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.4"/><path d="M17 14c2.5 0 4.5 2 4.5 4.5"/></svg>Team Workspace</button>
-    <button class="nav-pill np-green" onclick="openCommunityModal()"><svg class="nb-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/></svg>Community Gaps</button>
-    <button class="nav-pill np-blue" onclick="openEvalModal()"><svg class="nb-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 17v-5M12 17V8M16 17v-3"/></svg>Accuracy Dashboard</button>
-    <button class="nav-pill np-cyan" onclick="navTo('/explorer')"><svg class="nb-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>Publication Explorer</button>
-    <button class="nav-pill np-green" onclick="navTo('/deep-research')"><svg class="nb-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6M10 3v6L4.5 19a1.5 1.5 0 0 0 1.3 2.2h12.4a1.5 1.5 0 0 0 1.3-2.2L14 9V3"/><path d="M7.5 15h9"/></svg>Deep Research</button>
-    <button class="nav-pill np-blue" onclick="navTo('/verify')"><svg class="nb-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>Paper Verification</button>
+  <!-- Action row: centered; add new buttons here using class nav-pill + nav-pill--purple/green/orange/cyan -->
+  <div class="nav-actions">
+    <button class="nav-pill nav-pill--purple" onclick="openWorkspaceModal()">👥 Team Workspace</button>
+    <button class="nav-pill nav-pill--green" onclick="openCommunityModal()">🌍 Community Gaps</button>
+    <button class="nav-pill nav-pill--orange" onclick="openEvalModal()">📊 Accuracy Dashboard</button>
+    <button class="nav-pill nav-pill--cyan" onclick="window.location.href='/explorer'">🧭 Publication Explorer</button>
+    <button class="nav-pill nav-pill--green" onclick="window.location.href='/deep-research.html'">🔬 Deep Research</button>
+    <button class="nav-pill nav-pill--cyan" onclick="window.location.href='/verify'">🛡 Paper Verification</button>
+    <button class="nav-pill nav-pill--violet" title="Research Chatbot — chat with your uploaded papers" onclick="window.location.href='/chatbot'">💬 Research Chatbot</button>
   </div>
 </nav>
 
@@ -62,7 +73,7 @@
   <div class="hero-globe" id="heroGlobe"></div>
   <div class="hero-content">
     <div class="hero-label">AUTONOMOUS RESEARCH INTELLIGENCE</div>
-    <h1 class="hero-title">Discover What<br/><span class="gradient-text">Science Hasn't</span><br/>Explored Yet</h1>
+    <h1 class="hero-title">Discover What<br/><span class="gradient-text">Research Hasn't</span><br/>Explored Yet</h1>
     <p class="hero-sub">Upload your research papers. Our Agentic AI maps the knowledge graph, scans thousands of publications, and pinpoints exact gaps with verifiable evidence.</p>
     <div class="hero-stats">
       <div class="stat"><span class="stat-num">1M+</span><span class="stat-label">Papers Indexed</span></div>
@@ -617,19 +628,27 @@
   </div>
 
   <div id="workspaceJoined" style="display:none">
-    <div class="profile-section-title">
-      <span id="wsName">—</span> &nbsp;
-      <span style="color:var(--text3);font-weight:400">Join code: <span id="wsJoinCodeDisplay">—</span></span>
+    <div class="ws-hero">
+      <div class="ws-hero-main">
+        <span class="ws-hero-label">Workspace</span>
+        <span class="ws-hero-name" id="wsName">—</span>
+      </div>
+      <div class="ws-code" title="Share this code with teammates">
+        <span class="ws-code-label">Join code</span>
+        <span class="ws-code-value" id="wsJoinCodeDisplay">—</span>
+      </div>
     </div>
 
-    <div class="profile-section-title" style="margin-top:1rem">Dashboard</div>
-    <div id="wsDashboard" style="font-size:0.85rem;margin-bottom:1rem">Loading...</div>
+    <div class="panel-section-title">Overview</div>
+    <div id="wsDashboard" class="ws-dashboard">Loading...</div>
 
-    <div class="profile-section-title">Shared Library</div>
-    <div id="wsLibrary" style="margin-bottom:1rem">Loading...</div>
+    <div class="panel-section-title">Shared library</div>
+    <div id="wsLibrary" class="ws-library">Loading...</div>
 
-    <button class="plan-upgrade-btn" style="width:100%;margin-bottom:0.6rem" onclick="contributeToWorkspace()">Contribute Current Analysis</button>
-    <button class="profile-logout-btn" onclick="leaveWorkspace()">Leave Workspace</button>
+    <div class="panel-actions">
+      <button class="plan-upgrade-btn panel-btn-primary" onclick="contributeToWorkspace()">Contribute Current Analysis</button>
+      <button class="profile-logout-btn" onclick="leaveWorkspace()">Leave Workspace</button>
+    </div>
   </div>
 </div>
 
@@ -660,9 +679,6 @@
   <div id="evalDashboardContent">Loading...</div>
 </div>
 
-<script>
-function navTo(url){document.body.classList.add('page-leave');setTimeout(function(){window.location.href=url;},220);}
-</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
 <script src="/static/js/hero-globe.js"></script>
@@ -679,6 +695,121 @@ function navTo(url){document.body.classList.add('page-leave');setTimeout(functio
 </script>
 <script type="module" src="/static/js/app.js"></script>
 <script src="/static/js/publication-scope.js"></script>
+<script src="/static/js/scholar-ui.js" defer></script>
+<script>
+  // "Check on Scholar" with NO API key and no ScrapingBee: searches OpenAlex (free,
+  // 250M+ works, no signup) for the gap title and shows the closest papers inside
+  // the gap card. Runs in the capture phase so it replaces the old ScrapingBee
+  // handler (which needed SCRAPINGBEE_API_KEY) instead of running after it.
+  document.addEventListener('click', async function (e) {
+    const btn = e.target.closest && e.target.closest('button, a');
+    if (!btn || !/check on scholar/i.test(btn.textContent || '')) return;
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+
+    const card = btn.closest('.gap-card, [class*="gap-card"], [class*="gap-item"], .gap, [data-gap-title]') || btn.parentElement;
+    let title = (card && card.getAttribute && card.getAttribute('data-gap-title')) || '';
+    if (!title && card) {
+      const t = card.querySelector('.gap-title, [class*="gap-title"], [class*="gap-name"], h2, h3, h4');
+      if (t) title = t.textContent;
+    }
+    title = (title || '').replace(/\s+/g, ' ').trim();
+    if (!title) title = window.prompt('Enter the gap title to check:') || '';
+    if (!title) return;
+
+    // Result box inside the card (reused on repeat clicks)
+    let box = card.querySelector('.rl-scholar-result');
+    if (!box) {
+      box = document.createElement('div');
+      box.className = 'rl-scholar-result';
+      box.style.cssText = 'margin-top:0.9rem;padding:0.8rem 1rem;border:1px solid rgba(0,212,255,0.3);background:rgba(0,212,255,0.06);border-radius:10px;font-size:0.8rem;line-height:1.5;color:var(--text2,#cbd5e1)';
+      card.appendChild(box);
+    }
+    box.textContent = 'Searching OpenAlex for papers matching this gap…';
+
+    const scholarUrl = 'https://scholar.google.com/scholar?q=' + encodeURIComponent(title);
+    try {
+      const url = 'https://api.openalex.org/works?search=' + encodeURIComponent(title) +
+        '&per_page=5&select=id,title,publication_year,cited_by_count,doi&mailto=research@example.com';
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error('OpenAlex returned HTTP ' + resp.status);
+      const data = await resp.json();
+      const total = (data.meta && data.meta.count) || 0;
+      const works = data.results || [];
+
+      box.textContent = '';
+      const head = document.createElement('div');
+      head.style.cssText = 'font-weight:600;color:var(--cyan,#22d3ee);margin-bottom:0.4rem';
+      head.textContent = total.toLocaleString() + ' papers mention these terms — closest matches:';
+      box.appendChild(head);
+
+      if (!works.length) {
+        const none = document.createElement('div');
+        none.textContent = 'No close matches found — a good sign this angle is under-explored.';
+        box.appendChild(none);
+      }
+      works.forEach(function (w) {
+        const row = document.createElement('div');
+        row.style.cssText = 'margin:0.25rem 0';
+        const a = document.createElement('a');
+        a.href = w.doi || w.id; a.target = '_blank'; a.rel = 'noopener';
+        a.style.cssText = 'color:var(--cyan,#22d3ee);text-decoration:none';
+        a.textContent = w.title || '(untitled)';
+        row.appendChild(a);
+        const meta = document.createElement('span');
+        meta.style.color = 'var(--text3,#94a3b8)';
+        meta.textContent = ' (' + (w.publication_year || 'n.d.') + ' • ' + (w.cited_by_count || 0) + ' citations)';
+        row.appendChild(meta);
+        box.appendChild(row);
+      });
+
+      const foot = document.createElement('div');
+      foot.style.cssText = 'margin-top:0.5rem;font-size:0.72rem;color:var(--text3,#94a3b8)';
+      foot.appendChild(document.createTextNode('Source: OpenAlex. Many matches doesn\u2019t mean the gap is filled \u2014 read the top papers to confirm. '));
+      const g = document.createElement('a');
+      g.href = scholarUrl; g.target = '_blank'; g.rel = 'noopener';
+      g.style.color = 'var(--cyan,#22d3ee)';
+      g.textContent = 'Also search Google Scholar \u2197';
+      foot.appendChild(g);
+      box.appendChild(foot);
+    } catch (err) {
+      box.textContent = '';
+      const msg = document.createElement('div');
+      msg.textContent = 'Could not reach OpenAlex (' + err.message + '). ';
+      const g = document.createElement('a');
+      g.href = scholarUrl; g.target = '_blank'; g.rel = 'noopener';
+      g.style.color = 'var(--cyan,#22d3ee)';
+      g.textContent = 'Open Google Scholar instead \u2197';
+      msg.appendChild(g);
+      box.appendChild(msg);
+    }
+  }, true);
+</script>
+<script>
+  // Hides the "OpenAlex has no API key set ..." warning banner wherever the page
+  // (publication-scope.js) renders it. Finds the smallest element containing
+  // that text and removes it, now and whenever the banner is re-rendered.
+  (function () {
+    const NEEDLE = 'openalex has no api key set';
+    function sweep(root) {
+      const walker = document.createTreeWalker(root || document.body, NodeFilter.SHOW_TEXT);
+      const hits = [];
+      let n;
+      while ((n = walker.nextNode())) {
+        if ((n.nodeValue || '').toLowerCase().includes(NEEDLE)) hits.push(n);
+      }
+      hits.forEach(function (node) {
+        const el = node.parentElement;
+        if (el && el !== document.body) el.remove();
+      });
+    }
+    function start() {
+      sweep();
+      new MutationObserver(function () { sweep(); })
+        .observe(document.body, { childList: true, subtree: true, characterData: true });
+    }
+    if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
+  })();
+</script>
 <script>
   // Wizard flow: only one of the two cards (Publication Scope / Start Analysis)
   // is visible at a time. wizardGoTo() swaps them and updates the step pills.

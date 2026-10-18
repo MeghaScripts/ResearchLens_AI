@@ -171,6 +171,8 @@
 <script type="module">
   import '/static/js/firebase-auth.js';
   await window.rlAuth.requireAuth();
+  window.rlAuthIsReady = true;
+  document.dispatchEvent(new Event('rl-auth-ready'));
 </script>
 <script>
 let RUNS = [], RUN = null, PAPERS = [], OFFSET = 0;
@@ -454,13 +456,8 @@ function loadMore() { OFFSET += PAGE; loadPapers(false); }
 document.getElementById('fSearch').addEventListener('input', () => renderPapers(false));
 document.getElementById('fMode').addEventListener('change', loadRuns);
 
-// firebase-auth.js is a deferred module, so it patches window.fetch (to add the
-// Authorization header) only AFTER this classic script has already run. Calling
-// loadRuns() immediately sent an unauthenticated request -> 401. Wait for auth.
-(async () => {
-  while (!window.rlAuth) await new Promise(r => setTimeout(r, 25));
-  if (await window.rlAuth.requireAuth()) loadRuns();
-})();
+// wait for sign-in so fetch() carries the Firebase token (otherwise: 401)
+if (window.rlAuthIsReady) loadRuns(); else document.addEventListener('rl-auth-ready', loadRuns, { once: true });
 </script>
 </body>
 </html>

@@ -333,12 +333,14 @@ function renderLiveSteps(steps) {
   }).join('');
   document.getElementById('loadingBar').style.width =
     `${Math.min(96, Math.round((steps.length / EXPECTED_STEP_COUNT) * 100))}%`;
+  // keep the newest step in view inside the scrollable steps area
+  list.scrollTop = list.scrollHeight;
 }
 
 function renderLivePapers(count, sample) {
   if (!count) return;
   const box = document.getElementById('livePapersBox');
-  box.style.display = 'block';
+  box.style.display = 'flex';
   document.getElementById('livePapersHeader').textContent =
     `📚 Found ${count} papers — analyzing these:`;
   document.getElementById('livePapersList').innerHTML = sample.map(p =>

@@ -1,0 +1,14 @@
+.git
+.github
+.env
+.env.*
+**/__pycache__
+*.pyc
+*.db
+uploads
+reports
+docs
+backend/tests
+backend/serviceAccountKey.json
+venv
+.venv

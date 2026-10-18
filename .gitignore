@@ -33,3 +33,19 @@ firebase-debug.log
 .idea/
 .DS_Store
 *.log
+
+@"
+.env
+__pycache__/
+venv/
+*.pyc
+*.bak
+*.bak-*
+backend/apply_*.py
+backend/fix_*.py
+"@ | Out-File -Encoding utf8 .gitignore
+# Backups and one-off patch scripts
+*.bak
+*.bak-*
+backend/apply_*.py
+backend/fix_*.py

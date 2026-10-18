@@ -220,12 +220,12 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
 <section class="hero">
   <div class="hero-badge">
     <div class="badge-pulse"></div>
-    Autonomous Research Intelligence — Live ArXiv + Semantic Scholar
+    Autonomous Research Intelligence
   </div>
 
   <h1 class="hero-title">
     <span class="title-line1">Discover What</span>
-    <span class="title-line2">Science Hasn't</span>
+    <span class="title-line2">Research Hasn't</span>
     <span class="title-line3">Explored Yet</span>
   </h1>
 
@@ -234,23 +234,19 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
   </p>
 
   <div class="hero-counters">
-    <div class="hc-item">
-      <span class="hc-num" data-target="200">0</span>
-      <span class="hc-lbl">M+ Papers Indexed</span>
-    </div>
-    <div class="hc-item">
-      <span class="hc-num" data-target="10">0</span>
-      <span class="hc-lbl">Gaps Per Analysis</span>
-    </div>
-    <div class="hc-item">
-      <span class="hc-num" data-target="95">0</span>
-      <span class="hc-lbl">% AI Confidence</span>
-    </div>
-    <div class="hc-item">
-      <span class="hc-num">24h</span>
-      <span class="hc-lbl">Live Updates</span>
-    </div>
+  <div class="hc-item">
+    <span class="hc-num" data-target="1" data-suffix="M+">0M+</span>
+    <span class="hc-lbl">Papers Indexed</span>
   </div>
+  <div class="hc-item">
+    <span class="hc-num" data-target="5" data-suffix="">0</span>
+    <span class="hc-lbl">Papers At Once</span>
+  </div>
+  <div class="hc-item">
+    <span class="hc-num" data-target="95" data-suffix="%">0%</span>
+    <span class="hc-lbl">Evidence Backed</span>
+  </div>
+</div>
 
   <div class="hero-ctas">
     <button class="cta-primary" onclick="openLogin()">
@@ -278,7 +274,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
       <span class="feat-icon">🔬</span>
       <div class="feat-name">Evidence-Backed Proof</div>
       <div class="feat-desc">Every gap includes a detection pipeline, supporting papers with download links, and confidence scoring.</div>
-      <span class="feat-tag">ArXiv + Semantic Scholar</span>
+      <span class="feat-tag">Research Sites</span>
     </div>
     <div class="feat-card">
       <span class="feat-icon">📄</span>
@@ -317,7 +313,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
     <div class="tl-item">
       <div class="tl-num">02</div>
       <div class="tl-body">
-        <div class="tl-title">Live Paper Fetch <span class="tl-badge">ArXiv + Semantic Scholar</span></div>
+        <div class="tl-title">Live Paper Fetch <span class="tl-badge">Fetch papers from selected Research sites</span></div>
         <div class="tl-desc">We fetch real, live published papers from two academic sources — never fake data. Only verified, peer-reviewed content.</div>
       </div>
     </div>
@@ -353,7 +349,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
 </section>
 
 <footer class="site-footer">
-  <b>ResearchLens AI</b> — Autonomous Research Gap Detection &nbsp;·&nbsp; Powered by Groq LLaMA 3 · ArXiv · Semantic Scholar &nbsp;·&nbsp; Built for researchers
+  <b>ResearchLens AI</b> — Autonomous Research Gap Detection &nbsp;·&nbsp; Powered by Groq LLaMA 3 · User opted research sites &nbsp;·&nbsp; Built for researchers
 </footer>
 
 <!-- LOGIN MODAL -->
@@ -493,16 +489,18 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
   animate();
 
   // Counter animation
-  document.querySelectorAll('.hc-num[data-target]').forEach(el=>{
-    const target=parseInt(el.dataset.target);
-    let current=0;
-    const step=Math.ceil(target/60);
-    const iv=setInterval(()=>{
-      current=Math.min(current+step,target);
-      el.textContent=current+(target>=100?'%':target>=50?'M+':'+');
-      if(current>=target)clearInterval(iv);
-    },20);
-  });
+  // Counter animation
+document.querySelectorAll('.hc-num[data-target]').forEach(el=>{
+  const target=parseInt(el.dataset.target,10);
+  const suffix=el.dataset.suffix||'';
+  let current=0;
+  const step=Math.max(1,Math.ceil(target/60));
+  const iv=setInterval(()=>{
+    current=Math.min(current+step,target);
+    el.textContent=current+suffix;
+    if(current>=target)clearInterval(iv);
+  },20);
+});
 })();
 
 // Modal controls

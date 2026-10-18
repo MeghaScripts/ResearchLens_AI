@@ -4,9 +4,16 @@ services:
     env: python
     region: singapore
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: grep -viE '^(sentence-transformers|torch|numpy)==' requirements.txt > requirements.render.txt && pip install -r requirements.render.txt
     startCommand: gunicorn --chdir backend app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 300
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
-    healthCheckPath: /
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false            # paste the service-account JSON in the Render dashboard
+      - key: APP_SECRET_KEY
+        generateValue: true
+      - key: LOG_LEVEL
+        value: INFO
+    healthCheckPath: /health
+    autoDeploy: true

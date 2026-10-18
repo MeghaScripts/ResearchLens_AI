@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, send_file, send_from_directory, g
 from flask_cors import CORS
-import os, json, re, requests, time, sqlite3, xml.etree.ElementTree as ET
+import sys, os, json, re, requests, time, sqlite3, threading, xml.etree.ElementTree as ET
+import jobs
 
 # Loads backend/.env (see .env.example) into os.environ before anything
 # below reads GROQ_MODEL/TAVILY_API_KEY/etc. via os.environ.get(...).
@@ -19,15 +20,156 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
 from groq import Groq
 
+# ── Groq reliability wrapper (v3) ───────────────────────────────────────
+# 1) JSON replies: JSON mode + short reasoning + token headroom + one retry
+#    (fixes "Unterminated string" / "Expecting ',' delimiter").
+# 2) QUOTA: Groq's free tier gives each model a daily token budget (TPD,
+#    200,000 for gpt-oss-120b). When a model is out of tokens (or briefly
+#    over its per-minute limit) the call is retried / moved to the next model
+#    in GROQ_FALLBACK_MODELS (each model has its OWN daily budget), instead of
+#    every batch failing. If every model is exhausted a clear
+#    GroqQuotaExhausted error is raised (and the analysis stops early rather
+#    than firing dozens of doomed calls).
+import re as _re_fix, json as _json_fix, time as _time_fix, threading as _thr_fix
+_GroqBase = Groq
+
+class GroqQuotaExhausted(Exception):
+    pass
+
+_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
+    'GROQ_FALLBACK_MODELS',
+    'openai/gpt-oss-20b,meta-llama/llama-4-scout-17b-16e-instruct,llama-3.1-8b-instant'
+).split(',') if m.strip()]
+_model_blocked_until = {}
+_model_lock = _thr_fix.Lock()
+
+def _parse_wait_seconds(msg):
+    m = _re_fix.search(r'try again in (?:(\d+)h)?(?:(\d+)m(?!s))?(?:([\d.]+)s)?', msg or '')
+    if not m or not any(m.groups()):
+        return None
+    h, mi, sec = m.groups()
+    return int(h or 0) * 3600 + int(mi or 0) * 60 + float(sec or 0)
+
+def _block_model(model, seconds):
+    with _model_lock:
+        _model_blocked_until[model] = _time_fix.time() + max(30.0, float(seconds or 600))
+
+def _quota_message():
+    with _model_lock:
+        waits = [t - _time_fix.time() for t in _model_blocked_until.values() if t > _time_fix.time()]
+    mins = int(min(waits) // 60) + 1 if waits else 10
+    return ("Groq token quota is used up on every configured model (free-tier daily limit). "
+            f"It frees up again in about {mins} min. To keep going now: wait, set another "
+            "GROQ_MODEL / GROQ_FALLBACK_MODELS in backend/.env, or upgrade the Groq plan.")
+
+def _reply_is_valid_json(text):
+    t = (text or '').strip()
+    t = _re_fix.sub(r'^```[a-z]*\n?', '', t)
+    t = _re_fix.sub(r'\n?```$', '', t)
+    t = _re_fix.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', t)
+    try:
+        _json_fix.loads(t)
+        return True
+    except Exception:
+        return False
+
+def _try_model(orig_create, a, k, model):
+    """One model: returns a response, or None meaning 'move on to the next model'."""
+    tpm_waits = 0
+    json_dropped = False
+    while True:
+        try:
+            return orig_create(*a, **k)
+        except Exception as e:
+            msg = str(e); low = msg.lower(); status = getattr(e, 'status_code', None)
+            if status == 429 or 'rate limit' in low or 'rate_limit_exceeded' in low:
+                wait = _parse_wait_seconds(msg)
+                daily = ('per day' in low) or ('(tpd)' in low) or ('(rpd)' in low)
+                if daily or (wait is not None and wait > 45) or tpm_waits >= 2:
+                    _block_model(model, wait or 600)
+                    print(f'[groq] {model}: out of quota (retry in ~{int((wait or 600)//60)} min) — trying next model')
+                    return None
+                tpm_waits += 1
+                _time_fix.sleep(min((wait or 6) + 1, 30))
+                continue
+            if status == 404 or 'model_not_found' in low or 'does not exist' in low \
+                    or 'decommissioned' in low or ('model' in low and 'not found' in low):
+                _block_model(model, 86400)
+                print(f'[groq] {model}: not available on this account — skipping it')
+                return None
+            if status == 413 or 'request too large' in low or 'reduce your message size' in low:
+                print(f'[groq] {model}: request too large for this model — trying next model')
+                return None
+            if 'response_format' in k and not json_dropped and (status == 400 or 'json' in low):
+                json_dropped = True
+                k = dict(k)
+                k.pop('response_format', None)
+                k['max_tokens'] = min(4000, int(k.get('max_tokens') or 1500) + 1000)
+                print(f'[groq] {model}: JSON mode rejected ({msg[:90]}) — retrying without it')
+                continue
+            raise
+
+class Groq(_GroqBase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _orig_create = self.chat.completions.create
+
+        def _create(*a, **kw):
+            if kw.get('stream'):
+                return _orig_create(*a, **kw)
+            base_model = kw.get('model', '')
+            req = int(kw.get('max_tokens') or 0)
+            if 0 < req <= 2500:
+                kw['max_tokens'] = min(4000, req + 1500)
+            wants_json = 'json' in ' '.join(
+                str(m.get('content', '')) for m in (kw.get('messages') or [])).lower()
+            if wants_json and 'response_format' not in kw:
+                kw['response_format'] = {'type': 'json_object'}
+            now = _time_fix.time()
+            chain = [base_model] + [m for m in _FALLBACK_MODELS if m != base_model]
+            live = [m for m in chain if _model_blocked_until.get(m, 0) <= now]
+            for model in live:
+                k = dict(kw)
+                k['model'] = model
+                eb = dict(k.get('extra_body') or {})
+                if 'gpt-oss' in model:
+                    eb.setdefault('reasoning_effort', 'low')
+                else:
+                    eb.pop('reasoning_effort', None)
+                if eb:
+                    k['extra_body'] = eb
+                else:
+                    k.pop('extra_body', None)
+                resp = _try_model(_orig_create, a, k, model)
+                if resp is None:
+                    continue
+                if model != base_model:
+                    print(f'[groq] served by fallback model {model}')
+                if wants_json:
+                    try:
+                        ok = _reply_is_valid_json(resp.choices[0].message.content)
+                    except Exception:
+                        ok = True
+                    if not ok:
+                        print('[groq-json] reply was not valid JSON — retrying once')
+                        k2 = dict(k)
+                        k2['temperature'] = 0.1
+                        k2['max_tokens'] = min(4000, int(k.get('max_tokens') or 1500) + 1000)
+                        retry = _try_model(_orig_create, a, k2, model)
+                        if retry is not None:
+                            resp = retry
+                return resp
+            raise GroqQuotaExhausted(_quota_message())
+        self.chat.completions.create = _create
+# ────────────────────────────────────────────────────────────────────────
+
 # Groq deprecated llama-3.3-70b-versatile on 2026-08-16 (see
 # https://console.groq.com/docs/deprecations); openai/gpt-oss-120b is
 # their recommended production-tier replacement. Configurable via env
 # var so the next deprecation is a one-line fix, not a find-and-replace.
 GROQ_MODEL = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-120b')
 from werkzeug.utils import secure_filename
-from auth import require_auth, require_auth_or_cookie, install_download_cookie
-from llm_json import robust_json_loads
-from paper_quality import is_credible_paper, filter_credible
+from auth import require_auth
 from crypto_utils import encrypt_secret, decrypt_secret
 from agents import (
     Orchestrator, SearchAgent, PDFAnalysisAgent, MultiPDFAnalysisAgent,
@@ -53,60 +195,21 @@ from publications import (
 from academic_sources import FREE_SOURCES, KEYED_SOURCES, keyed_source_status, DBLP_VENUE_STREAMS, fetch_dblp_venue, \
     SPECIALIZED_SOURCE_DOMAINS, relevant_specialized_sources
 import deep_collection
-import jobs
-import threading
 import provenance
 import paper_verification
 import verification_store
+from chatbot import register_chatbot_routes
 import current_trends
 import full_text_analysis
+import openalex_client
+import pdf_text as pdf_fonts
+import paper_quality
 from agents.textsim import compute_grounded_novelty
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph as _RLParagraph, Spacer, Table, TableStyle, HRFlowable
-
-import unicodedata as _unicodedata
-
-# ReportLab's built-in Helvetica only has WinAnsi (cp1252) glyphs. LLM text is
-# full of characters outside it (non-breaking hyphen U+2011, minus sign, arrows,
-# narrow no-break space, ...) which render as solid BLACK BOXES in the PDF.
-# Every Paragraph in this app goes through this sanitizer so that can't happen.
-_PDF_CHAR_MAP = {
-    '\u2010': '-', '\u2011': '-', '\u2012': '-', '\u2015': '\u2014', '\u2212': '-',
-    '\u00a0': ' ', '\u202f': ' ', '\u2009': ' ', '\u200a': ' ', '\u2002': ' ', '\u2003': ' ',
-    '\u200b': '', '\u200c': '', '\u200d': '', '\ufeff': '', '\u00ad': '',
-    '\u2192': '->', '\u2190': '<-', '\u2194': '<->', '\u21d2': '=>', '\u2265': '>=', '\u2264': '<=',
-    '\u2260': '!=', '\u2248': '~', '\u00d7': 'x', '\u2217': '*', '\u2713': '[x]', '\u2714': '[x]',
-    '\u2022': '\u2022', '\u25cf': '\u2022', '\u25aa': '\u2022', '\u25a0': '\u2022',
-}
-
-def pdf_safe_text(text):
-    if text is None:
-        return ''
-    text = str(text)
-    out = []
-    for ch in text:
-        ch = _PDF_CHAR_MAP.get(ch, ch)
-        for c in ch:
-            try:
-                c.encode('cp1252')
-                out.append(c)
-            except UnicodeEncodeError:
-                d = _unicodedata.normalize('NFKD', c).encode('ascii', 'ignore').decode('ascii')
-                out.append(d)  # drop anything with no sensible fallback (emoji etc.)
-    return ''.join(out)
-
-def _pdf_escape_stray_markup(text):
-    """LLM text may contain a bare '&' or '<' that would crash Paragraph's
-    mini-HTML parser. Escape them unless they are part of a tag/entity we use."""
-    text = re.sub(r'&(?!(?:amp|lt|gt|nbsp|quot|#\d+);)', '&amp;', text)
-    text = re.sub(r'<(?!/?(?:b|i|u|br|font|super|sub|strong|em|a)\b)', '&lt;', text)
-    return text
-
-def Paragraph(text, style=None, *args, **kwargs):
-    return _RLParagraph(_pdf_escape_stray_markup(pdf_safe_text(text)), style, *args, **kwargs)
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 
 app = Flask(__name__, static_folder='../frontend', static_url_path='')
@@ -365,6 +468,7 @@ def explorer_page():
 
 @app.route('/deep-research')
 def deep_research_page():
+    """Deep Research UI (linked from the Deep Research button on index.html)."""
     return send_from_directory('../frontend', 'deep-research.html')
 
 @app.route('/verify')
@@ -411,7 +515,10 @@ def _fetch_semantic_scholar(topic, max_results=50, venue=None, offset=0):
         venue_param = ','.join(v.strip() for v in venue if v and v.strip())
         if venue_param:
             url += f"&venue={requests.utils.quote(venue_param)}"
-    headers = {'User-Agent': 'ResearchLensAI/1.0 (mailto:megham112004@gmail.com)'}
+    headers = {'User-Agent': 'ResearchLensAI/1.0 (mailto:research@example.com)'}
+    _s2_key = (os.environ.get('SEMANTIC_SCHOLAR_API_KEY') or '').strip()
+    if _s2_key:
+        headers['x-api-key'] = _s2_key   # keyed tier: far fewer 429s
 
     max_attempts = 3
     data = None
@@ -497,7 +604,6 @@ def _fetch_openalex(topic, max_results=50, page=1):
         url = (
             f"https://api.openalex.org/works?search={query}"
             f"&per_page={min(max_results, 100)}&page={max(1, page)}"
-            f"&mailto=megham112004@gmail.com"
         )
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
@@ -585,7 +691,7 @@ def _fetch_arxiv_for_multi(topic, max_results, offset=0):
     (impact scoring falls back to recency-only for arXiv results)."""
     query = topic.replace(' ', '+')
     url = f"https://export.arxiv.org/api/query?search_query=all:{query}&start={max(0, offset)}&max_results={max_results}&sortBy=submittedDate&sortOrder=descending"
-    resp = requests.get(url, timeout=8, headers={'User-Agent': 'ResearchLensAI/1.0 (mailto:megham112004@gmail.com)'})
+    resp = requests.get(url, timeout=8, headers={'User-Agent': 'ResearchLensAI/1.0 (mailto:research@example.com)'})
     resp.raise_for_status()
     papers = _parse_arxiv_xml(resp.text)
     for p in papers:
@@ -630,8 +736,6 @@ def fetch_papers_multi_source(topic, max_results=50, sources=None, venue_filter=
 
     def add_papers(papers):
         for p in papers:
-            if not is_credible_paper(p):
-                continue   # junk/test records (e.g. title 'dfgdf', authors 'AI AI')
             key = _normalize_title(p['title'])
             if key and key not in seen_titles:
                 seen_titles.add(key)
@@ -981,7 +1085,7 @@ def fetch_arxiv_papers(topic, max_results=50):
     for endpoint_idx, url in enumerate(endpoints):
         for attempt in range(2):  # 2 attempts per endpoint — faster failover to Semantic Scholar
             try:
-                resp = requests.get(url, timeout=8, headers={'User-Agent': 'ResearchLensAI/1.0 (mailto:megham112004@gmail.com)'})
+                resp = requests.get(url, timeout=8, headers={'User-Agent': 'ResearchLensAI/1.0 (mailto:research@example.com)'})
                 resp.raise_for_status()
                 papers = _parse_arxiv_xml(resp.text)
                 if papers:
@@ -1237,15 +1341,17 @@ def _chunk_papers_by_token_budget(papers, line_fn, reserved_tokens=4200, overhea
     if chunk:
         yield chunk
 
-def _dedupe_gaps(gaps, max_gaps=15):
-    seen, out = set(), []
-    for g in gaps:
-        key = re.sub(r'[^a-z0-9]+', ' ', (g.get('gap_title') or '').lower()).strip()[:60]
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        out.append(g)
-    return out[:max_gaps]
+# A normal analysis targets this many research gaps (env GAPS_TARGET).
+GAPS_TARGET = int(os.environ.get('GAPS_TARGET', '50'))
+# Upper bound on Groq calls spent on gap detection per analysis (token budget).
+MAX_GAP_BATCHES = int(os.environ.get('MAX_GAP_BATCHES', '8'))
+import math as _math_gap
+
+def _dedupe_gaps(gaps, max_gaps=None):
+    """Removes only genuine near-duplicate gaps (same title prefix or high TF-IDF
+    similarity), ranks by severity then confidence, caps at GAPS_TARGET (default 50).
+    See paper_quality.dedupe_gaps."""
+    return paper_quality.dedupe_gaps(gaps, max_gaps=max_gaps or GAPS_TARGET)
 
 
 def _salvage_truncated_json(raw):
@@ -1283,7 +1389,7 @@ def _parse_groq_json(raw, log_prefix):
     raw = re.sub(r'\n?```$', '', raw)
     raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
     try:
-        return robust_json_loads(raw)
+        return json.loads(raw)
     except Exception as e:
         salvaged = _salvage_truncated_json(raw)
         if salvaged is not None:
@@ -1295,16 +1401,37 @@ def _parse_groq_json(raw, log_prefix):
         return None
 
 
+def _plan_gap_batches_capped(papers):
+    """Theme-grouped, token-budgeted batches, merged down to at most MAX_GAP_BATCHES
+    so one analysis never burns more than a fixed share of the Groq daily budget."""
+    line = lambda p: f"- {p['title']} ({p['year']})"
+    batches = []
+    for group, theme in paper_quality.plan_gap_batches(papers):
+        for sub in _chunk_papers_by_token_budget(group, line):
+            batches.append((sub, theme))
+    if len(batches) > MAX_GAP_BATCHES:
+        flat = [p for sub, _t in batches for p in sub]
+        budget_tokens = max(500, GROQ_TPM_BUDGET - 4200 - 600)
+        avg = max(1.0, sum(len(line(p)) for p in flat) / max(1, len(flat)) / _CHARS_PER_TOKEN)
+        size = min(-(-len(flat) // MAX_GAP_BATCHES), max(1, int(budget_tokens / avg)))
+        flat = flat[:size * MAX_GAP_BATCHES]
+        batches = [(flat[i:i + size], '') for i in range(0, len(flat), size)]
+    return batches
+
+
 def analyze_gaps_with_groq(api_key, topic, pdf_text, papers, keywords, primary_domain=None):
     client = Groq(api_key=api_key)
     kw_str = ", ".join(keywords[:20])
     pdf_excerpt = pdf_text[:3000] if pdf_text else "No PDF provided."
-    batches = list(_chunk_papers_by_token_budget(papers, lambda p: f"- {p['title']} ({p['year']})"))
+    batches = _plan_gap_batches_capped(papers)
+    # each batch is asked for enough gaps that the merged, de-duplicated list reaches GAPS_TARGET
+    n_ask = max(4, min(12, _math_gap.ceil(GAPS_TARGET * 1.3 / max(1, len(batches)))))
+    print(f"[gap-analysis] {len(papers)} papers -> {len(batches)} batch(es), asking ~{n_ask} gaps each (target {GAPS_TARGET})")
     merged = {"research_gaps": [], "existing_coverage": [], "emerging_trends": []}
     got_headline_fields = False
     succeeded = 0
-    for i, batch in enumerate(batches):
-        result = _analyze_gaps_batch_with_groq(client, topic, pdf_excerpt, batch, kw_str)
+    for i, (batch, theme) in enumerate(batches):
+        result = _analyze_gaps_batch_with_groq(client, topic, pdf_excerpt, batch, kw_str, theme=theme, n_gaps=n_ask)
         if result is None:
             continue
         succeeded += 1
@@ -1326,15 +1453,41 @@ def analyze_gaps_with_groq(api_key, topic, pdf_text, papers, keywords, primary_d
             f"lines above for the underlying Groq error."
         )
     merged["research_gaps"] = _dedupe_gaps(merged["research_gaps"])
-    merged["existing_coverage"] = merged["existing_coverage"][:6]
-    merged["emerging_trends"] = merged["emerging_trends"][:6]
+
+    # Top-up: if de-duplication left fewer than the target, ask again (excluding what we already have).
+    rounds = 0
+    while len(merged["research_gaps"]) < GAPS_TARGET and rounds < 2 and batches:
+        need = GAPS_TARGET - len(merged["research_gaps"])
+        batch, theme = batches[rounds % len(batches)]
+        titles = [g.get('gap_title', '') for g in merged["research_gaps"]]
+        rounds += 1
+        time.sleep(2.5)
+        try:
+            extra = _analyze_gaps_batch_with_groq(client, topic, pdf_excerpt, batch, kw_str, theme=theme,
+                                                  n_gaps=min(12, need + 2), exclude_titles=titles)
+        except GroqQuotaExhausted:
+            print("[gap-analysis] quota exhausted during top-up — keeping the gaps found so far")
+            break
+        if extra is None:
+            continue
+        merged["research_gaps"].extend(extra.get("research_gaps", []))
+        merged["research_gaps"] = _dedupe_gaps(merged["research_gaps"])
+    print(f"[gap-analysis] final: {len(merged['research_gaps'])} gaps (target {GAPS_TARGET})")
+
+    merged["existing_coverage"] = merged["existing_coverage"][:12]
+    merged["emerging_trends"] = merged["emerging_trends"][:12]
     result = merged
     _finish_gap_analysis_with_novelty(result, pdf_text, topic, papers, primary_domain)
     return result
 
 
-def _analyze_gaps_batch_with_groq(client, topic, pdf_excerpt, papers, kw_str):
+def _analyze_gaps_batch_with_groq(client, topic, pdf_excerpt, papers, kw_str, theme='', n_gaps=6, exclude_titles=None):
     paper_titles = "\n".join([f"- {p['title']} ({p['year']})" for p in papers])
+    theme_line = (f"THEME OF THIS BATCH (key terms shared by these papers): {theme}\n"
+                  f"Focus on gaps specific to this theme.\n") if theme else ""
+    exclude_line = ("ALREADY FOUND GAPS (do NOT repeat or rephrase any of these; find DIFFERENT ones):\n"
+                    + "\n".join(f"- {t}" for t in (exclude_titles or [])[:60]) + "\n") if exclude_titles else ""
+    lo, hi = max(3, n_gaps - 1), n_gaps + 1
     prompt = f"""You are an expert academic research analyst. Analyze the following and provide a comprehensive research gap analysis.
 
 RESEARCH TOPIC: {topic}
@@ -1342,8 +1495,8 @@ USER'S PAPER EXCERPT: {pdf_excerpt}
 EXISTING RELATED PAPERS:
 {paper_titles}
 KEY CONCEPTS FOUND: {kw_str}
-
-IMPORTANT: Based on the related papers and the topic provided, identify BETWEEN 3 AND 6 distinct, non-overlapping research gaps from THIS batch of papers (results from other batches of the same corpus are merged separately, so keep this batch's response focused and complete rather than exhaustive). Each gap must be genuinely different from the others, covering a different sub-theme, methodology, application domain, or limitation.
+{theme_line}{exclude_line}
+IMPORTANT: Based on the related papers and the topic provided, identify BETWEEN {lo} AND {hi} distinct, non-overlapping research gaps from THIS batch of papers (results from other batches of the same corpus are merged separately). Each gap must be genuinely different from the others, covering a different sub-theme, methodology, application domain, or limitation. Keep EVERY text field to ONE concise sentence (about 25 words at most) so that all the gaps fit in the reply.
 
 Provide a detailed JSON response (no markdown, pure JSON):
 {{
@@ -1362,12 +1515,12 @@ Provide a detailed JSON response (no markdown, pure JSON):
       "suggested_approach": "How to address this gap",
       "estimated_impact": "Expected contribution",
       "evidence_papers": ["actual paper title from the list above", "another actual paper title"],
-      "evidence_explanation": "Detailed explanation of HOW these specific papers prove this gap exists - cite what they found, what they explicitly said is missing or future work",
+      "evidence_explanation": "How these specific papers show the gap exists",
       "evidence_quote": "If (and only if) the USER'S PAPER EXCERPT above directly supports this gap, copy an EXACT short quote (max 25 words) verbatim from it. If no exact supporting quote exists in the excerpt, use an empty string - do NOT paraphrase or invent one.",
       "evidence_page": "The [PAGE n] number the quote appeared under in the excerpt, as an integer, or null if evidence_quote is empty",
       "confidence_score": 85
     }}
-    // ... continue this pattern for EVERY distinct gap you find, do not stop at a fixed number
+    // ... continue this pattern for EVERY distinct gap you find
   ],
   "emerging_trends": [
     {{"trend": "trend name", "description": "brief description", "relevance": "high/medium"}},
@@ -1378,16 +1531,19 @@ Provide a detailed JSON response (no markdown, pure JSON):
   "gap_density": "high/medium/low",
   "overall_recommendation": "One powerful sentence"
 }}"""
+    est_in = len(prompt) // _CHARS_PER_TOKEN
+    max_out = max(3000, min(5800, GROQ_TPM_BUDGET - est_in - 300))
     try:
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role":"user","content":prompt}],
-            temperature=0.3, max_tokens=4200
+            temperature=0.3, max_tokens=max_out
         )
+    except GroqQuotaExhausted:
+        raise
     except Exception as e:
-        # A single batch hitting a rate limit (or any transient Groq
-        # error) shouldn't fail the whole 1000-paper run — the caller
-        # just merges whatever batches succeeded.
+        # A single batch hitting a transient Groq error shouldn't fail the
+        # whole run — the caller just merges whatever batches succeeded.
         print(f"[gap-analysis-batch] skipped a batch after Groq error: {e}")
         return None
     return _parse_groq_json(response.choices[0].message.content, "gap-analysis-batch")
@@ -1489,7 +1645,7 @@ Provide a comprehensive multi-paper analysis as pure JSON (no markdown):
     # Clean bad escapes the LLM sometimes produces
     import re as _re2
     raw = _re2.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-    result = robust_json_loads(raw)
+    result = json.loads(raw)
 
     # Real, computed novelty score — see analyze_gaps_with_groq above for
     # the full rationale. Subject text here is the combined text of all
@@ -1547,12 +1703,12 @@ Respond with pure JSON, no markdown:
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3, max_tokens=2500,
+        temperature=0.3, max_tokens=800,
     )
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r'^```[a-z]*\n?', '', raw)
     raw = re.sub(r'\n?```$', '', raw)
-    return robust_json_loads(raw)
+    return json.loads(raw)
 
 
 def forecast_research_trends_with_groq(api_key, topic, trend_stats, current_trends=None):
@@ -1625,13 +1781,13 @@ Provide pure JSON, no markdown:
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3, max_tokens=3500,
+        temperature=0.3, max_tokens=1500,
     )
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r'^```[a-z]*\n?', '', raw)
     raw = re.sub(r'\n?```$', '', raw)
     raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-    return robust_json_loads(raw)
+    return json.loads(raw)
 
 
 def analyze_deep_research_gaps_with_groq(api_key, topic, papers, trend_stats, current_trends=None, forecast=None,
@@ -1806,6 +1962,8 @@ Provide a detailed JSON response (no markdown, pure JSON):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3, max_tokens=4200
         )
+    except GroqQuotaExhausted:
+        raise
     except Exception as e:
         print(f"[deep-gap-analysis-batch] skipped a batch after Groq error: {e}")
         return None
@@ -1999,7 +2157,37 @@ orchestrator.register(PaperVerificationAgent(paper_verification.verify_papers))
 # Publication Intelligence routes (/api/domains, /api/journals, /api/conferences,
 # /api/societies, /api/publishers, /api/classify-research-topic). Registered as
 # its own blueprint so it can't collide with any existing @app.route below.
+# Throttle/retry OpenAlex (stops the 429 floods) and make PDF reports render all characters.
+# >>> researchlens-openalex-fix
+_oa_install = getattr(openalex_client, 'install', None) or getattr(openalex_client, 'install_everywhere', None)
+if _oa_install:
+    _oa_install()   # API key + throttle + 429 retry + daily-budget breaker
+else:
+    print('[openalex_client] no install()/install_everywhere() found - OpenAlex runs unprotected')
+try:
+    from scholar_routes import register_scholar_routes   # /api/integrations/status lives here
+    register_scholar_routes(app, require_auth)
+except Exception as _scholar_err:
+    print(f'[integrations] scholar_routes not loaded ({_scholar_err}); using built-in status route')
+if not any(_r.rule == '/api/integrations/status' for _r in app.url_map.iter_rules()):
+    @app.route('/api/integrations/status', methods=['GET'])
+    def integrations_status_fallback():
+        st = {}
+        try:
+            fn = getattr(openalex_client, 'status', None) or getattr(openalex_client, 'budget_state', None)
+            st = fn() if fn else {}
+        except Exception:
+            pass
+        return jsonify({'ok': True, 'openalex': st,
+                        'openalex_key_set': bool((os.environ.get('OPENALEX_API_KEY') or '').strip()),
+                        'semantic_scholar_key_set': bool((os.environ.get('SEMANTIC_SCHOLAR_API_KEY') or '').strip())})
+# <<< researchlens-openalex-fix
+import monitoring
+monitoring.install(app, lambda: DB_PATH)   # /health /ready /metrics /api/version + request logging
+pdf_fonts.install(sys.modules[__name__])
 register_publication_routes(app, get_db)
+# Research Chatbot (/chatbot, /api/chatbot/*): document-grounded chat over uploaded papers.
+register_chatbot_routes(app, get_db, require_auth, GROQ_MODEL, upload_root=UPLOAD_FOLDER)
 # citation_agent and monitoring_agent are registered further down, right
 # after papers_to_bibtex() and run_topic_check() are defined.
 # Enterprise-level agents
@@ -2036,8 +2224,20 @@ def list_agents():
 #     removed. Merely-uncorroborated papers stay, labelled, because with
 #     ~40 papers a strict "VERIFIED only" gate would remove most of them.
 STANDARD_VERIFY_ENABLED = os.environ.get('STANDARD_VERIFY_ENABLED', '1') != '0'
-STANDARD_VERIFY_NETWORK_TOP_N = int(os.environ.get('STANDARD_VERIFY_NETWORK_TOP_N', '40'))
-STANDARD_VERIFY_TIMEOUT_S = float(os.environ.get('STANDARD_VERIFY_TIMEOUT_S', '40'))
+STANDARD_VERIFY_NETWORK_TOP_N = int(os.environ.get('STANDARD_VERIFY_NETWORK_TOP_N', '80'))
+_STD_TIMEOUT_ENV = os.environ.get('STANDARD_VERIFY_TIMEOUT_S')
+STANDARD_VERIFY_TIMEOUT_S = float(_STD_TIMEOUT_ENV or '40')   # base value; see _std_verify_timeout
+
+
+def _std_verify_timeout(n_papers):
+    """An explicit STANDARD_VERIFY_TIMEOUT_S wins; otherwise scale with corpus size so a
+    500-paper run isn't abandoned after 40s (40s + 0.2s per paper, max 150s)."""
+    if _STD_TIMEOUT_ENV:
+        return STANDARD_VERIFY_TIMEOUT_S
+    # was min(150, 40 + 0.2n): a 500-paper run was abandoned after 126s, before the
+    # registry checks could finish. Wait up to 10 min; progress is shown live meanwhile.
+    return min(600.0, 240.0 + 0.5 * max(0, n_papers))
+
 _verify_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='std-verify')
 
 _VERIFY_FIELDS_ON_PAPER = (
@@ -2046,9 +2246,48 @@ _VERIFY_FIELDS_ON_PAPER = (
     'verification_reasons')
 
 
+try:
+    _orig_set_papers = jobs.set_papers
+    def _set_papers_filtered(job_id, papers, *a, **k):
+        # Hide obvious junk even in the first progress snapshot (before the topic-aware gate runs).
+        kept = [p for p in papers if not paper_quality.junk_reason(p)]
+        return _orig_set_papers(job_id, kept if kept else papers, *a, **k)
+    jobs.set_papers = _set_papers_filtered
+except Exception as _e:
+    print(f"could not wrap jobs.set_papers: {_e}")
+
+
+def _apply_local_quality_gate(context):
+    """Instant, offline quality gate that ALWAYS runs (even if the network verification
+    is disabled, slow or times out): removes gibberish titles, editorial / reviewer-list
+    items, papers with no topic terms or no metadata, and duplicate titles.
+    See paper_quality.local_quality_filter."""
+    papers = list(context.get('papers') or [])
+    if not papers:
+        context['_local_quality_dropped'] = []
+        return
+    kept, dropped = paper_quality.local_quality_filter(papers, context.get('topic', ''))
+    context['papers'] = kept
+    context['_local_quality_dropped'] = dropped
+    if dropped:
+        print(f"quality gate: dropped {len(dropped)} of {len(papers)} papers "
+              f"(e.g. {dropped[0]['title']!r}: {dropped[0]['reason']})")
+        # Refresh the live "Found N papers - analyzing these" list so the person sees
+        # the filtered set, and say what was removed.
+        jid = context.get('_job_id')
+        if jid:
+            try:
+                jobs.set_papers(jid, kept)
+                jobs.add_step(jid, 'quality_gate',
+                              f"Quality gate removed {len(dropped)} junk / non-research record(s); {len(kept)} papers remain")
+            except Exception as e:
+                print(f"quality gate: could not update live progress: {e}")
+
+
 def _start_standard_verification(context):
     """Starts verification of context['papers'] on copies. Returns
     (future, originals, work_copies, t0) or None when there is nothing to do."""
+    _apply_local_quality_gate(context)
     if not STANDARD_VERIFY_ENABLED:
         return None
     originals = list(context.get('papers') or [])
@@ -2061,27 +2300,56 @@ def _start_standard_verification(context):
             deep_collection.compute_impact_score(p)
         except Exception as e:
             print(f"standard verification: could not prepare '{p.get('title','')[:50]}': {e}")
+    v_kwargs = dict(idea_description=context.get('idea_description'),
+                    network_top_n=STANDARD_VERIFY_NETWORK_TOP_N)
+    try:   # live progress in the loading panel (only if this verify_papers supports it)
+        import inspect as _inspect
+        if 'progress_cb' in _inspect.signature(paper_verification.verify_papers).parameters:
+            _jid = context.get('_job_id')
+
+            def _verify_progress(msg, _jid=_jid):
+                print(f'[verify] {msg}')
+                if _jid:
+                    try:
+                        jobs.add_step(_jid, 'paper_verification', f'Verifying papers: {msg}')
+                    except Exception:
+                        pass
+            v_kwargs['progress_cb'] = _verify_progress
+    except Exception as _e:
+        print(f'standard verification: progress reporting unavailable: {_e}')
     fut = _verify_pool.submit(
-        paper_verification.verify_papers, work, context.get('topic', ''),
-        idea_description=context.get('idea_description'),
-        network_top_n=STANDARD_VERIFY_NETWORK_TOP_N)
+        paper_verification.verify_papers, work, context.get('topic', ''), **v_kwargs)
     return fut, originals, work, time.monotonic()
 
 
 def _finish_standard_verification(job, context, topic, owner_uid, mode_label='standard'):
+    """Wraps the network verification result and adds what the always-on local quality
+    gate removed (shown in the same 'rejected' list, status LOW_QUALITY)."""
+    info, rejected, removed = _finish_standard_verification_core(job, context, topic, owner_uid, mode_label)
+    local = context.get('_local_quality_dropped') or []
+    info['local_quality_filter'] = {'dropped': len(local), 'examples': local[:25]}
+    rejected = list(rejected) + [
+        {'title': d.get('title'), 'year': d.get('year'), 'source': d.get('source'),
+         'verification_status': 'LOW_QUALITY', 'verification_reasons': [d.get('reason')]}
+        for d in local]
+    return info, rejected, removed
+
+
+def _finish_standard_verification_core(job, context, topic, owner_uid, mode_label='standard'):
     """Waits (bounded) for the job, drops REJECTED papers from
     context['papers'], labels the rest, persists the run, and returns
     (verification_info, rejected_list_for_response, papers_were_removed)."""
     if job is None:
         return {'ran': False, 'reason': 'disabled or no papers'}, [], False
     fut, originals, work, t0 = job
-    remaining = max(0.5, STANDARD_VERIFY_TIMEOUT_S - (time.monotonic() - t0))
+    timeout_s = _std_verify_timeout(len(originals))
+    remaining = max(0.5, timeout_s - (time.monotonic() - t0))
     try:
         result = fut.result(timeout=remaining)
     except FuturesTimeout:
         fut.cancel()
-        print(f"standard verification: not finished in {STANDARD_VERIFY_TIMEOUT_S:.0f}s; continuing unverified")
-        return ({'ran': False, 'error': f'verification did not finish within {STANDARD_VERIFY_TIMEOUT_S:.0f}s; '
+        print(f"standard verification: not finished in {timeout_s:.0f}s; continuing unverified (local quality gate still applied)")
+        return ({'ran': False, 'error': f'verification did not finish within {timeout_s:.0f}s; '
                                         'papers are shown unverified'}, [], False)
     except Exception as e:
         print(f"standard verification failed, continuing unverified: {e}")
@@ -2131,94 +2399,23 @@ def _finish_standard_verification(job, context, topic, owner_uid, mode_label='st
     return info, rejected_out, removed
 
 
-# ─── Single paper analysis endpoint ─────────────────────────────────
-def _read_single_form():
-    """Reads the analyze form fields while still inside the request."""
-    paper_sources_raw = request.form.get('paper_sources','').strip()
-    venue_filter_raw = request.form.get('venue_filter','').strip()
-    return {
-        'api_key': request.form.get('api_key','').strip(),
-        'topic': request.form.get('topic','').strip(),
-        'idea_description': request.form.get('idea_description','').strip(),
-        'primary_domain': request.form.get('primary_domain','').strip(),
-        'secondary_domains': request.form.get('secondary_domains','').strip(),
-        'preferred_venues': request.form.get('preferred_venues','').strip(),
-        'paper_sources': [s.strip() for s in paper_sources_raw.split(',') if s.strip()] if paper_sources_raw else None,
-        'venue_filter': [v.strip() for v in venue_filter_raw.split(',') if v.strip()] if venue_filter_raw else None,
-    }
-
-
-def _save_uploaded_pdf(pdf_file):
-    if pdf_file and pdf_file.filename:
-        fname = f"{uuid.uuid4()}_{secure_filename(pdf_file.filename)}"
-        fpath = os.path.join(UPLOAD_FOLDER, fname)
-        pdf_file.save(fpath)
-        return fpath
-    return None
-
-
-@app.route('/api/analyze', methods=['POST'])
-@require_auth
-def analyze():
-    form = _read_single_form()
-    if not form['api_key']: return jsonify({'error':'Groq API key is required'}),400
-    if not form['topic']:   return jsonify({'error':'Research topic is required'}),400
-    pdf_path = _save_uploaded_pdf(request.files.get('pdf'))
-    payload, status = _run_single_analysis(form, pdf_path, g.uid)
-    return jsonify(payload), status
-
-
-@app.route('/api/analyze/start', methods=['POST'])
-@require_auth
-def analyze_start():
-    """Starts the single-paper pipeline in a background thread and returns a
-    job_id immediately; the frontend polls /api/analyze/status/<job_id>."""
-    form = _read_single_form()
-    if not form['api_key']: return jsonify({'error':'Groq API key is required'}),400
-    if not form['topic']:   return jsonify({'error':'Research topic is required'}),400
-    pdf_path = _save_uploaded_pdf(request.files.get('pdf'))
-    uid = g.uid
-    job_id = jobs.create_job(uid)
-
-    def _worker():
-        try:
-            payload, status = _run_single_analysis(form, pdf_path, uid, job_id=job_id)
-            if status == 200:
-                jobs.finish_job(job_id, result=payload)
-            else:
-                jobs.finish_job(job_id, error=payload.get('error') or 'Analysis failed')
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            jobs.finish_job(job_id, error=str(e))
-
-    threading.Thread(target=_worker, daemon=True, name=f'analyze-{job_id}').start()
-    return jsonify({'job_id': job_id})
-
-
-@app.route('/api/analyze/status/<job_id>', methods=['GET'])
-@require_auth
-def analyze_status(job_id):
-    job = jobs.get_job(job_id, uid=g.uid)
-    if job is None:
-        return jsonify({'error': 'Job not found'}), 404
-    return jsonify({
-        'status': job['status'], 'steps': job['steps'],
-        'papers_count': job['papers_count'], 'papers_sample': job['papers_sample'],
-        'result': job['result'] if job['status'] == 'done' else None,
-        'error': job['error'],
-    })
-
-
-def _run_single_analysis(form, pdf_path, uid, job_id=None):
-    """The single-paper pipeline. Returns (payload_dict, http_status). Takes
-    plain values (no flask request/g) so it can run in a background thread."""
-    api_key = form['api_key']; topic = form['topic']
-    idea_description = form['idea_description']
-    primary_domain = form['primary_domain']
-    secondary_domains = form['secondary_domains']
-    preferred_venues = form['preferred_venues']
-    paper_sources = form['paper_sources']
-    venue_filter = form['venue_filter']
+# ─── Single paper analysis ──────────────────────────────────────────
+def _run_single_analysis(form, pdf_filepath, uid, job_id=None):
+    """Whole single-paper pipeline. Returns (payload_dict, http_status).
+    No dependency on Flask's request/g, so it runs inline (/api/analyze)
+    or in a background thread (/api/analyze/start)."""
+    api_key  = form.get('api_key','').strip()
+    topic    = form.get('topic','').strip()
+    idea_description  = form.get('idea_description','').strip()
+    primary_domain    = form.get('primary_domain','').strip()
+    secondary_domains = form.get('secondary_domains','').strip()
+    preferred_venues  = form.get('preferred_venues','').strip()
+    paper_sources_raw = form.get('paper_sources','').strip()
+    paper_sources = [s.strip() for s in paper_sources_raw.split(',') if s.strip()] if paper_sources_raw else None
+    venue_filter_raw = form.get('venue_filter','').strip()
+    venue_filter = [v.strip() for v in venue_filter_raw.split(',') if v.strip()] if venue_filter_raw else None
+    if not api_key: return {'error':'Groq API key is required'}, 400
+    if not topic:   return {'error':'Research topic is required'}, 400
 
     # The optional "Describe Your Idea" text enriches the topic used for
     # search / gap-detection / report generation (context['topic']), but
@@ -2236,8 +2433,8 @@ def _run_single_analysis(form, pdf_path, uid, job_id=None):
         'venue_filter': venue_filter,    # None = no venue restriction (applies to Semantic Scholar only)
     }
 
-    if pdf_path:
-        context['pdf_filepath'] = pdf_path
+    if pdf_filepath:
+        context['pdf_filepath'] = pdf_filepath
     if job_id:
         context['_job_id'] = job_id
 
@@ -2372,6 +2569,62 @@ def _run_single_analysis(form, pdf_path, uid, job_id=None):
         'preferred_venues': preferred_venues or None,
         'agent_trace': trace_to_dicts(context.get('_trace', [])),
     }, 200
+
+def _save_upload(pdf_file):
+    if pdf_file and pdf_file.filename:
+        fpath = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_{secure_filename(pdf_file.filename)}")
+        pdf_file.save(fpath)
+        return fpath
+    return None
+
+
+@app.route('/api/analyze', methods=['POST'])
+@require_auth
+def analyze():
+    payload, status = _run_single_analysis(
+        request.form, _save_upload(request.files.get('pdf')), g.uid)
+    return jsonify(payload), status
+
+
+@app.route('/api/analyze/start', methods=['POST'])
+@require_auth
+def analyze_start():
+    """Runs the same pipeline in a background thread; returns a job_id."""
+    form = request.form.to_dict()
+    if not form.get('api_key', '').strip():
+        return jsonify({'error': 'Groq API key is required'}), 400
+    if not form.get('topic', '').strip():
+        return jsonify({'error': 'Research topic is required'}), 400
+    pdf_filepath = _save_upload(request.files.get('pdf'))
+    uid = g.uid
+    job_id = jobs.create_job(uid)
+
+    def _worker():
+        try:
+            payload, status = _run_single_analysis(form, pdf_filepath, uid, job_id)
+            if status == 200:
+                jobs.finish_job(job_id, result=payload)
+            else:
+                jobs.finish_job(job_id, error=payload.get('error') or 'Analysis failed')
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            jobs.finish_job(job_id, error=str(e))
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({'job_id': job_id}), 202
+
+
+@app.route('/api/analyze/status/<job_id>', methods=['GET'])
+@require_auth
+def analyze_status(job_id):
+    job = jobs.get_job(job_id, uid=g.uid)
+    if job is None:
+        return jsonify({'error': 'Job not found'}), 404
+    out = {k: job[k] for k in ('status', 'steps', 'papers_count', 'papers_sample', 'error')}
+    if job['status'] == 'done':
+        out['result'] = job['result']
+    return jsonify(out)
+
 
 # Past this many seconds, optional deep-research stages are skipped (see
 # deep_research). Keep it well under the gunicorn --timeout in render.yaml.
@@ -2988,9 +3241,8 @@ def analyze_multi():
         'agent_trace': trace_to_dicts(context.get('_trace', [])),
     })
 
-install_download_cookie(app)
 @app.route('/api/download/<filename>')
-@require_auth_or_cookie
+@require_auth
 def download_report(filename):
     # 1) Path traversal: strip any directory components (`../../etc/passwd`,
     #    absolute paths, etc.) before it ever touches the filesystem.
@@ -3340,13 +3592,13 @@ def gap_litreview():
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role":"user","content":prompt}],
-            temperature=0.3, max_tokens=3500
+            temperature=0.3, max_tokens=1500
         )
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r'^```[a-z]*\n?','',raw)
         raw = re.sub(r'\n?```$','',raw)
         raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-        return jsonify(robust_json_loads(raw))
+        return jsonify(json.loads(raw))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -3404,13 +3656,13 @@ def gap_funding():
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role":"user","content":prompt}],
-            temperature=0.2, max_tokens=3000
+            temperature=0.2, max_tokens=1200
         )
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r'^```[a-z]*\n?','',raw)
         raw = re.sub(r'\n?```$','',raw)
         raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-        return jsonify(robust_json_loads(raw))
+        return jsonify(json.loads(raw))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -3474,7 +3726,7 @@ def related_work():
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role":"user","content":prompt}],
-            temperature=0.3, max_tokens=5000
+            temperature=0.3, max_tokens=2500
         )
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r'^```[a-z]*\n?','',raw)
@@ -3482,7 +3734,7 @@ def related_work():
         # Safety net: strip any invalid backslash escapes the model still
         # produces despite instructions (e.g. stray LaTeX in math notation)
         raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-        result = robust_json_loads(raw)
+        result = json.loads(raw)
         result['bibtex_keys_note'] = 'Citation keys match the keys in your BibTeX export — download both together. Citations are in [key] format; find-and-replace with \\cite{key} for LaTeX.'
         return jsonify(result)
     except json.JSONDecodeError as e:
@@ -3516,7 +3768,7 @@ def generate_gap_brief_pdf(topic, gap, output_path):
 
     story.append(Paragraph(gap.get('gap_title',''), h2))
     conf = gap.get('confidence_score', 'N/A')
-    badge = Table([[pdf_safe_text(f"{sev.upper()} PRIORITY"), pdf_safe_text(f"{conf}% confidence")]], colWidths=[3*inch, 3*inch])
+    badge = Table([[f"{sev.upper()} PRIORITY", f"{conf}% confidence"]], colWidths=[3*inch, 3*inch])
     badge.setStyle(TableStyle([
         ('BACKGROUND',(0,0),(0,0), colors.HexColor(sev_colors.get(sev,'#999999'))),
         ('BACKGROUND',(1,0),(1,0), colors.HexColor('#0f3460')),
@@ -3906,6 +4158,11 @@ def workspace_contribute(join_code):
         if not ws:
             conn.close()
             return jsonify({'error': 'Workspace not found'}), 404
+        # Only real research papers enter the shared library (same gate as analysis).
+        papers, low_quality = paper_quality.local_quality_filter(papers, topic)
+        if not papers:
+            return jsonify({'success': True, 'added': 0, 'skipped_duplicates': 0,
+                            'rejected_low_quality': len(low_quality)})
         added, skipped = 0, 0
         for p in papers:
             norm = _normalize_title(p.get('title', ''))
@@ -3927,7 +4184,8 @@ def workspace_contribute(join_code):
             added += 1
         conn.commit()
         conn.close()
-        return jsonify({'success': True, 'added': added, 'skipped_duplicates': skipped})
+        return jsonify({'success': True, 'added': added, 'skipped_duplicates': skipped,
+                        'rejected_low_quality': len(low_quality)})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -3948,12 +4206,15 @@ def workspace_library(join_code):
             (ws['id'],)
         ).fetchall()
         conn.close()
-        papers = []
+        papers, hidden = [], 0
         for r in rows:
             d = dict(r)
             d['authors'] = json.loads(d.pop('authors_json') or '[]')
+            if paper_quality.junk_reason(d):          # hide junk contributed before the quality gate existed
+                hidden += 1
+                continue
             papers.append(d)
-        return jsonify({'papers': papers, 'count': len(papers)})
+        return jsonify({'papers': papers, 'count': len(papers), 'hidden_low_quality': hidden})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -4164,13 +4425,13 @@ def thesis_check():
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role":"user","content":prompt}],
-            temperature=0.2, max_tokens=3000
+            temperature=0.2, max_tokens=1200
         )
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r'^```[a-z]*\n?','',raw)
         raw = re.sub(r'\n?```$','',raw)
         raw = re.sub(r'\\(?!["\\bfnrtu/]|u[0-9a-fA-F]{4})', '', raw)
-        result = robust_json_loads(raw)
+        result = json.loads(raw)
         result['papers_checked_against'] = len(papers)
         return jsonify(result)
     except json.JSONDecodeError as e:
