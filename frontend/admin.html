@@ -104,7 +104,7 @@ async function api(path, opts={}){
   opts.headers = Object.assign({'Content-Type':'application/json','Authorization':'Bearer '+ADMIN_TOKEN}, opts.headers||{});
   const r = await fetch('/api/admin'+path, opts);
   if(r.status===401 || r.status===403){ adminLogout(); throw new Error('Not authorized'); }
-  const d = await r.json();
+  const d = await r.json().catch(()=>({error:'Server returned non-JSON (HTTP '+r.status+')'}));
   if(!r.ok) throw new Error(d.error||'Request failed');
   return d;
 }
@@ -116,7 +116,7 @@ async function adminLogin(){
   errEl.textContent = '';
   try{
     const r = await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});
-    const d = await r.json();
+    const d = await r.json().catch(()=>({error:'Server returned non-JSON (HTTP '+r.status+') - is the admin API registered?'}));
     if(!r.ok) throw new Error(d.error||'Login failed');
     ADMIN_TOKEN = d.token;
     sessionStorage.setItem(TOKEN_KEY, ADMIN_TOKEN);
@@ -167,27 +167,27 @@ async function loadUsers(){
       <td>${u.is_admin ? '✅' : ''}</td>
       <td class="muted">${esc(u.created_at||'').slice(0,10)}</td>
       <td>
-        <select onchange="patchUser(${u.id},'plan',this.value)">
+        <select onchange="patchUser('${esc(u.id)}','plan',this.value)">
           <option value="free" ${u.plan==='free'?'selected':''}>free</option>
           <option value="premium" ${u.plan==='premium'?'selected':''}>premium</option>
         </select>
-        <select onchange="patchUser(${u.id},'status',this.value)">
+        <select onchange="patchUser('${esc(u.id)}','status',this.value)">
           <option value="active" ${u.status==='active'?'selected':''}>active</option>
           <option value="suspended" ${u.status==='suspended'?'selected':''}>suspended</option>
         </select>
-        <button class="small" onclick="deleteUser(${u.id})">Delete</button>
+        <button class="small" onclick="deleteUser('${esc(u.id)}')">Delete</button>
       </td>
     </tr>`).join('');
   el.innerHTML = `<table><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Plan</th><th>Status</th><th>Admin</th><th>Joined</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan=8 class=muted>No users yet</td></tr>'}</tbody></table>`;
 }
 
 async function patchUser(id, field, value){
-  await api('/users/'+id, {method:'PATCH', body: JSON.stringify({[field]: value})});
+  await api('/users/'+encodeURIComponent(id), {method:'PATCH', body: JSON.stringify({[field]: value})});
   loadUsers(); loadKpis();
 }
 async function deleteUser(id){
   if(!confirm('Delete this user? This cannot be undone.')) return;
-  await api('/users/'+id, {method:'DELETE'});
+  await api('/users/'+encodeURIComponent(id), {method:'DELETE'});
   loadUsers(); loadKpis();
 }
 

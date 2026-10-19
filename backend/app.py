@@ -4683,7 +4683,8 @@ def accuracy_summary():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-
+from admin_routes import register_admin
+register_admin(app, get_db, UPLOAD_FOLDER, REPORTS_FOLDER, DB_PATH)
 # Start the background scheduler (daily checks)
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
