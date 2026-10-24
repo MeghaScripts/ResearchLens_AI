@@ -502,7 +502,7 @@ def check_source_authorized(paper):
 # ─── Small helpers ──────────────────────────────────────────────────
 
 def _norm_doi(doi):
-    d = (doi or '').strip().lower()
+    d = (doi if isinstance(doi, str) else str(doi or '')).strip().lower()
     d = re.sub(r'^https?://(dx\.)?doi\.org/', '', d)
     return d or None
 
@@ -1913,6 +1913,28 @@ def decision_band(paper):
 
 # ─── Top-level entry point ──────────────────────────────────────────
 
+_UNKNOWN_ON_ERROR = {'isbn_resolves': None, 'dblp_resolves': None,
+                     'openalex_lookup_batch': {}, 'semantic_scholar_lookup_batch': {}}
+
+
+def _guarded(name):
+    """Look a registry function up at call time and make it incapable of aborting the run.
+
+    An unexpected exception from a registry client (a bug, a malformed response, a timeout that escaped
+    the client's own handling) becomes the same "could not check" answer an unreachable registry gives:
+    {'found': False, 'error': ...} for single lookups, {} for batches, None for the True/False/None
+    resolvers. "Could not check" never counts as a failed check - see honesty note 2 at the top."""
+    def call(*args, **kwargs):
+        try:
+            return globals()[name](*args, **kwargs)
+        except Exception as e:
+            print(f"[verify] {name} raised {type(e).__name__}: {e} - treated as 'could not check'")
+            if name in _UNKNOWN_ON_ERROR:
+                return _UNKNOWN_ON_ERROR[name]
+            return {'found': False, 'error': f'{type(e).__name__}: {e}'}
+    return call
+
+
 def verify_papers(papers, topic, keywords=None, research_question=None,
                   idea_description=None, network_top_n=None, progress_cb=None):
     """
@@ -1951,13 +1973,13 @@ def verify_papers(papers, topic, keywords=None, research_question=None,
     if progress_cb:
         progress_cb('Cross-checking DOIs against OpenAlex (batched)...')
     all_dois = [p.get('doi') for p in papers if _norm_doi(p.get('doi'))]
-    openalex_by_doi = openalex_lookup_batch(all_dois) if all_dois else {}
+    openalex_by_doi = _guarded('openalex_lookup_batch')(all_dois) if all_dois else {}
 
     # --- Semantic Scholar: batched third registry, keyed on DOI OR
     # arXiv ID, so it also corroborates papers Crossref can never see.
     if progress_cb:
         progress_cb('Cross-checking identifiers against Semantic Scholar (batched)...')
-    s2_by_key = semantic_scholar_lookup_batch(papers)
+    s2_by_key = _guarded('semantic_scholar_lookup_batch')(papers)
     # Which S2 lookups genuinely got an answer (see the note in
     # semantic_scholar_lookup_batch). A key that was never answered
     # must score as "not checked", not as "does not exist".
@@ -1972,7 +1994,7 @@ def verify_papers(papers, topic, keywords=None, research_question=None,
         with ThreadPoolExecutor(max_workers=max(1, VERIFY_MAX_WORKERS)) as pool:
             for doi, result in zip(
                     [_norm_doi(p.get('doi')) for p in crossref_targets],
-                    pool.map(lambda p: crossref_lookup(p.get('doi')), crossref_targets)):
+                    pool.map(lambda p: _guarded('crossref_lookup')(p.get('doi')), crossref_targets)):
                 crossref_by_doi[doi] = result
 
     # --- DBLP resolution: same network budget as Crossref, and only
@@ -1988,7 +2010,7 @@ def verify_papers(papers, topic, keywords=None, research_question=None,
         with ThreadPoolExecutor(max_workers=max(1, VERIFY_MAX_WORKERS)) as pool:
             for key, result in zip(
                     [p.get('dblp_key') for p in dblp_targets],
-                    pool.map(lambda p: dblp_resolves(p.get('dblp_key')), dblp_targets)):
+                    pool.map(lambda p: _guarded('dblp_resolves')(p.get('dblp_key')), dblp_targets)):
                 dblp_resolved_by_key[key] = result
 
     # --- PMID resolution: NCBI ESummary, bounded to the network budget,
@@ -2004,7 +2026,7 @@ def verify_papers(papers, topic, keywords=None, research_question=None,
             progress_cb(f'Verifying PMIDs against NCBI ({len(pmid_targets)})...')
         with ThreadPoolExecutor(max_workers=max(1, VERIFY_MAX_WORKERS)) as pool:
             for pmid, result in zip([p.get('pmid') for p in pmid_targets],
-                                    pool.map(lambda p: pubmed_lookup(p.get('pmid')), pmid_targets)):
+                                    pool.map(lambda p: _guarded('pubmed_lookup')(p.get('pmid')), pmid_targets)):
                 pmid_by_id[pmid] = result
 
     # --- OpenAlex ID / S2 paper ID / CORE ID / INSPIRE ID resolution:
@@ -2036,19 +2058,19 @@ def verify_papers(papers, topic, keywords=None, research_question=None,
             progress_cb('Resolving remaining OpenAlex/S2/CORE/INSPIRE/ISBN identifiers...')
         with ThreadPoolExecutor(max_workers=max(1, VERIFY_MAX_WORKERS)) as pool:
             if oaid_targets:
-                for p, r in zip(oaid_targets, pool.map(lambda p: openalex_id_lookup(p.get('openalex_id')), oaid_targets)):
+                for p, r in zip(oaid_targets, pool.map(lambda p: _guarded('openalex_id_lookup')(p.get('openalex_id')), oaid_targets)):
                     oaid_by_id[p.get('openalex_id')] = r
             if ssid_targets:
-                for p, r in zip(ssid_targets, pool.map(lambda p: semantic_scholar_id_lookup(p.get('ss_id')), ssid_targets)):
+                for p, r in zip(ssid_targets, pool.map(lambda p: _guarded('semantic_scholar_id_lookup')(p.get('ss_id')), ssid_targets)):
                     ssid_by_id[p.get('ss_id')] = r
             if core_targets:
-                for p, r in zip(core_targets, pool.map(lambda p: core_id_lookup(p.get('core_id')), core_targets)):
+                for p, r in zip(core_targets, pool.map(lambda p: _guarded('core_id_lookup')(p.get('core_id')), core_targets)):
                     core_by_id[p.get('core_id')] = r
             if inspire_targets:
-                for p, r in zip(inspire_targets, pool.map(lambda p: inspire_id_lookup(p.get('inspire_id')), inspire_targets)):
+                for p, r in zip(inspire_targets, pool.map(lambda p: _guarded('inspire_id_lookup')(p.get('inspire_id')), inspire_targets)):
                     inspire_by_id[p.get('inspire_id')] = r
             if isbn_targets:
-                for p, r in zip(isbn_targets, pool.map(lambda p: isbn_resolves(p.get('isbn')), isbn_targets)):
+                for p, r in zip(isbn_targets, pool.map(lambda p: _guarded('isbn_resolves')(p.get('isbn')), isbn_targets)):
                     isbn_by_id[p.get('isbn')] = r
 
     # --- Bibliographic search: genuine cross-source corroboration for

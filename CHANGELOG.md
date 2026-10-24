@@ -10,6 +10,11 @@ All notable changes. Format: [Keep a Changelog](https://keepachangelog.com), ver
   - Optional agreement between runs (`GAP_CONSENSUS_RUNS`, default 1 = off).
 - `backend/eval/`: labelled-set builder (OpenAlex), registry cache, 70/30 stratified evaluation with threshold tuning on train only, coverage vs decisive accuracy with Wilson 95% intervals, and an offline smoke test.
 - `paper_verification.decision_band()`: accept / reject / review (abstain).
+### Fixed
+- `verify_papers` no longer aborts when a registry client raises unexpectedly (`_guarded`), and accepts a non-string DOI.
+- Daily scheduler now starts on hosts with a non-zoneinfo timezone name (`BackgroundScheduler(timezone='UTC')`).
+### Added (reliability)
+- `tests/test_reliability.py` fault-injection tests, `scripts/load_test.py`, `docs/SCALABILITY_RELIABILITY.md`.
 ### Changed
 - The proof panel no longer substitutes the first three collected papers when a gap cites none.
 ### Removed

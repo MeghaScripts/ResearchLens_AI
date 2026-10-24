@@ -4760,7 +4760,7 @@ register_admin(app, get_db, UPLOAD_FOLDER, REPORTS_FOLDER, DB_PATH)
 # Start the background scheduler (daily checks)
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
-    scheduler = BackgroundScheduler()
+    scheduler = BackgroundScheduler(timezone='UTC')   # explicit: tzlocal fails on some hosts (e.g. TZ=Asia/Calcutta)
     scheduler.add_job(scheduled_check_all, 'interval', hours=24, id='daily_topic_check')
     scheduler.start()
     print("[Scheduler] Started — watched topics will auto-check every 24 hours")
