@@ -1,6 +1,20 @@
 # Changelog
 All notable changes. Format: [Keep a Changelog](https://keepachangelog.com), versioning: [SemVer](https://semver.org).
 
+## [Unreleased]
+### Added
+- `backend/claim_check.py`: claim-level verification of AI-generated gaps.
+  - Gap prompts number the corpus papers `[P1]..[Pn]` and ask for `evidence_ids`; unknown IDs are dropped and recorded in `evidence_ids_unknown`, so a hallucinated paper title can no longer appear as evidence (title matching stays as a fallback).
+  - Each gap's cited abstracts are judged `supported / partial / unsupported / contradicted` (`unverifiable` when no abstract exists or the judge is unavailable); the label feeds `priority_score` and is shown on the gap card.
+  - Semantic "already addressed" check against recent papers (embeddings, TF-IDF fallback, method is labelled); strengthens `appears_already_addressed`.
+  - Optional agreement between runs (`GAP_CONSENSUS_RUNS`, default 1 = off).
+- `backend/eval/`: labelled-set builder (OpenAlex), registry cache, 70/30 stratified evaluation with threshold tuning on train only, coverage vs decisive accuracy with Wilson 95% intervals, and an offline smoke test.
+- `paper_verification.decision_band()`: accept / reject / review (abstain).
+### Changed
+- The proof panel no longer substitutes the first three collected papers when a gap cites none.
+### Removed
+- `.bak` backups, `diag*.txt` debug dumps and the already-applied `apply_backend_fix.py`.
+
 ## [1.0.0] - 2026-10-17
 ### Added
 - Research Chatbot (`/chatbot`): paper upload, cited answers, notes, mind maps, flowcharts, flashcards, quizzes.

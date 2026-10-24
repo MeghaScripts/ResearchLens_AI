@@ -49,3 +49,8 @@ backend/fix_*.py
 *.bak-*
 backend/apply_*.py
 backend/fix_*.py
+
+# Verification evaluation artefacts (regenerate with python -m eval.build_eval_set / eval.run_eval)
+backend/eval/registry_cache.json
+backend/eval/results.json
+*.bak

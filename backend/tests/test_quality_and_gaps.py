@@ -104,14 +104,21 @@ class _FakeGroq:
         _FakeGroq.calls += 1
         n = _FakeGroq.calls
         prompt = kw['messages'][0]['content']
+        if 'strict fact-checker' in prompt:                 # claim_check.py judge call
+            msg = type('M', (), {'content': json.dumps({'results': []})})()
+            return type('R', (), {'choices': [type('C', (), {'message': msg})()]})()
         theme = prompt.split('THEME OF THIS BATCH')[1].split('\n')[0] if 'THEME OF THIS BATCH' in prompt else 'general'
-        listed = [l[2:].rsplit(' (', 1)[0] for l in prompt.split('\n') if l.startswith('- ')]
+        # papers are listed as '[P3] Title (2021)' - the model must cite IDs, not titles
+        import re as _re
+        rows = [_re.match(r'\[(P\d+)\] (.*) \(', l) for l in prompt.split('\n')]
+        rows = [m.groups() for m in rows if m]
+        listed = [t for _pid, t in rows]
         # each gap cites ONE different paper and talks about it (a real gap does; grounding
         # checks that), so gaps stay distinct and are not merged by the de-duplicator
         gaps = [{'gap_title': f'Batch {n} gap {j} about {theme[:20]} zq{n}x{j}', 'severity': 'major',
                  'description': (f'Existing work on {theme} lacks study number {n} {j} qq{n}{j} '
                                  f'under real deployment conditions, as seen in {listed[j % len(listed)]}.'),
-                 'confidence_score': 80, 'evidence_papers': [listed[j % len(listed)]]} for j in range(5)]
+                 'confidence_score': 80, 'evidence_ids': [rows[j % len(rows)][0], 'P9999']} for j in range(5)]
         msg = type('M', (), {'content': json.dumps({'summary': 's', 'research_gaps': gaps, 'existing_coverage': [], 'emerging_trends': [],
                                                     'recommended_next_steps': [], 'gap_density': 'high', 'overall_recommendation': 'r'})})()
         return type('R', (), {'choices': [type('C', (), {'message': msg})()]})()
@@ -202,3 +209,18 @@ def test_analysis_result_reports_grounding(monkeypatch):
     monkeypatch.setattr(appmod, '_finish_gap_analysis_with_novelty', lambda *a, **k: None)
     res = appmod.analyze_gaps_with_groq('k', 'federated learning', '', _corpus(60), ['federated'])
     assert res['grounding']['kept'] == len(res['research_gaps']) and all(g['grounded'] for g in res['research_gaps'])
+
+def test_hallucinated_ids_never_reach_the_final_gaps(monkeypatch):
+    """The fake model cites a real ID plus P9999 (not in the corpus) on every gap; the P9999 must vanish."""
+    import app as appmod
+    monkeypatch.setattr(appmod, 'Groq', _FakeGroq)
+    monkeypatch.setattr(appmod.time, 'sleep', lambda s: None)
+    monkeypatch.setattr(appmod, '_finish_gap_analysis_with_novelty', lambda *a, **k: None)
+    res = appmod.analyze_gaps_with_groq('k', 'federated learning', '', _corpus(60), ['federated'])
+    titles = {p['title'] for p in _corpus(60)}
+    assert res['research_gaps']
+    for g in res['research_gaps']:
+        assert 'P9999' not in g['evidence_ids'] and 'P9999' in g['evidence_ids_unknown']
+        assert set(g['evidence_papers']) <= titles
+    assert res['claim_check']['enabled'] is True
+    assert len(res['research_gaps']) <= appmod.GAPS_TARGET

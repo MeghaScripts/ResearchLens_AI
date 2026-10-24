@@ -1894,6 +1894,23 @@ def decide_verdict(paper):
     return paper
 
 
+ACCEPT_STATUSES = frozenset({'HIGHLY_VERIFIED', 'VERIFIED'})
+REJECT_STATUSES = frozenset({'REJECTED', 'RETRACTED', 'OFF_TOPIC'})
+
+
+def decision_band(paper):
+    """Collapse the seven verdicts into the three-way decision used for evaluation and the UI:
+    'accept' (HIGHLY_VERIFIED / VERIFIED), 'reject' (REJECTED / RETRACTED / OFF_TOPIC) and
+    'review' (PARTIALLY_VERIFIED / UNVERIFIED / anything else) - the system abstains and a human looks.
+    A confident accept/reject is the "decisive" verdict whose accuracy eval/ reports."""
+    status = paper.get('verification_status')
+    if status in ACCEPT_STATUSES:
+        return 'accept'
+    if status in REJECT_STATUSES:
+        return 'reject'
+    return 'review'
+
+
 # ─── Top-level entry point ──────────────────────────────────────────
 
 def verify_papers(papers, topic, keywords=None, research_question=None,

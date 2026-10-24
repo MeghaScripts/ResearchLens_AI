@@ -549,6 +549,28 @@ function renderCoverageTable(coverage) {
 }
 
 // ── Gaps with Proof Button ───────────────────────────────────────────
+// Claim-level verification badge (backend/claim_check.py): does the cited abstract support the claim,
+// and does recent literature already address it? Nothing is shown when the backend did not run the check.
+function claimBadge(g) {
+  const cc = g.claim_check || (g.validation && g.validation.claim_support ? {label: g.validation.claim_support, reason: g.validation.claim_support_reason} : null);
+  if (!cc || !cc.label) return '';
+  const meta = {
+    supported:    ['✓ Claim supported', 'cov-low'],
+    partial:      ['≈ Partly supported', 'cov-medium'],
+    unsupported:  ['⚠ Not supported by cited abstracts', 'cov-high'],
+    contradicted: ['✗ Contradicted by cited abstracts', 'cov-high'],
+    unverifiable: ['? Could not be checked', 'cov-medium'],
+  }[cc.label];
+  if (!meta) return '';
+  const tip = esc(cc.reason || '');
+  let html = `<span class="cov-badge ${meta[1]}" style="margin-left:0.5rem" title="${tip}">${meta[0]}</span>`;
+  if (cc.semantic_addressed) {
+    const by = (cc.addressed_by || []).map(a => a.title).filter(Boolean).slice(0, 2).join(' | ');
+    html += `<span class="cov-badge cov-high" style="margin-left:0.5rem" title="${esc(by)}">Possibly already addressed</span>`;
+  }
+  return html;
+}
+
 function renderGaps(gaps, arxivPapers) {
   const grid = document.getElementById('gapsGrid');
   grid.innerHTML = gaps.map((g, i) => {
@@ -561,7 +583,7 @@ function renderGaps(gaps, arxivPapers) {
     return `<div class="gap-card ${sev} fade-in" data-severity="${sev}" data-gap="${i}" style="animation-delay:${i*0.1}s">
       <div class="gap-top">
         <span class="gap-badge badge-${sev}">${sev}</span>
-        <h4 class="gap-title">${esc(g.gap_title||'')}${verifiedBadge}</h4>
+        <h4 class="gap-title">${esc(g.gap_title||'')}${verifiedBadge}${claimBadge(g)}</h4>
         <button class="gap-proof-btn" onclick="showProof(${i})">🔗 View Proof</button>
       </div>
       <div class="gap-confidence">
@@ -607,11 +629,8 @@ window.showProof = (gapIndex) => {
   const confColor = confidence>=80?'#3fae8a':confidence>=60?'#ff9f43':'#ff4757';
   const confGrad = confidence>=80?'linear-gradient(90deg,#3fae8a,#c9a24b)':confidence>=60?'linear-gradient(90deg,#ff9f43,#ffd700)':'linear-gradient(90deg,#ff4757,#ff9f43)';
 
-  // Auto-populate evidence papers from related papers if AI returned empty
-  if (evidencePapers.length === 0 && currentData && currentData.papers) {
-    const related = currentData.papers.slice(0, 3).map(p => p.title);
-    evidencePapers.push(...related);
-  }
+  // No evidence is shown rather than invented: if the model cited no real paper, say so.
+  // (Previously the first 3 collected papers were substituted, which looked like real proof.)
 
   proofContent.innerHTML = `
     <!-- STAT CARDS ROW -->
@@ -625,7 +644,7 @@ window.showProof = (gapIndex) => {
         <div class="prf-stat-lbl">Confidence</div>
       </div>
       <div class="prf-stat" style="--c:#6b4fd6">
-        <div class="prf-stat-val" style="color:#6b4fd6">${evidencePapers.length>0?evidencePapers.length:'Auto'}</div>
+        <div class="prf-stat-val" style="color:#6b4fd6">${evidencePapers.length}</div>
         <div class="prf-stat-lbl">Evidence Papers</div>
       </div>
       <div class="prf-stat" style="--c:#c9a24b">

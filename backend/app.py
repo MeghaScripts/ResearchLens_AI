@@ -207,6 +207,7 @@ import full_text_analysis
 import openalex_client
 import pdf_text as pdf_fonts
 import paper_quality
+import claim_check
 from agents.textsim import compute_grounded_novelty
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -1389,6 +1390,16 @@ def _chunk_papers_by_token_budget(papers, line_fn, reserved_tokens=4200, overhea
 GAPS_TARGET = int(os.environ.get('GAPS_TARGET', '50'))
 # Upper bound on Groq calls spent on gap detection per analysis (token budget).
 MAX_GAP_BATCHES = int(os.environ.get('MAX_GAP_BATCHES', '8'))
+# Independent gap-generation runs used for agreement filtering (1 = off). Each extra run repeats every
+# batch call, so it multiplies the Groq budget; keep 1 on the free tier unless you need the filter.
+GAP_CONSENSUS_RUNS = max(1, int(os.environ.get('GAP_CONSENSUS_RUNS', '1')))
+GAP_CONSENSUS_MIN_AGREE = int(os.environ.get('GAP_CONSENSUS_MIN_AGREE', '2'))
+
+
+def _claim_judge(client):
+    """prompt -> dict, used by claim_check.check_claims (one small JSON call per group of gaps)."""
+    return lambda prompt: groq_json.chat_json(client, GROQ_MODEL, prompt, max_tokens=1800,
+                                              temperature=0.0, label='claim-check')
 import math as _math_gap
 
 def _dedupe_gaps(gaps, max_gaps=None):
@@ -1532,13 +1543,53 @@ def analyze_gaps_with_groq(api_key, topic, pdf_text, papers, keywords, primary_d
 
     merged["existing_coverage"] = merged["existing_coverage"][:12]
     merged["emerging_trends"] = merged["emerging_trends"][:12]
+
+    # Agreement between runs (optional): regenerate gaps with a different seed/temperature and keep the
+    # ones that recur. Only runs when GAP_CONSENSUS_RUNS > 1.
+    if GAP_CONSENSUS_RUNS > 1 and merged["research_gaps"]:
+        extra_runs = []
+        for run_no in range(1, GAP_CONSENSUS_RUNS):
+            run_gaps = []
+            try:
+                for (batch, theme) in batches:
+                    time.sleep(2.5)
+                    res = _analyze_gaps_batch_with_groq(client, topic, pdf_excerpt, batch, kw_str, theme=theme,
+                                                        n_gaps=n_ask, temperature=0.3 + 0.2 * run_no)
+                    if res:
+                        run_gaps.extend(res.get("research_gaps", []))
+            except GroqQuotaExhausted:
+                print("[gap-analysis] quota exhausted during consensus run - using the runs completed so far")
+                if run_gaps:
+                    extra_runs.append(_dedupe_gaps(run_gaps))
+                break
+            extra_runs.append(_dedupe_gaps(run_gaps))
+        if extra_runs:
+            merged["research_gaps"], _dropped = claim_check.apply_consensus(
+                merged["research_gaps"], extra_runs, min_agree=GAP_CONSENSUS_MIN_AGREE)
+            merged["consensus"] = {"runs": 1 + len(extra_runs), "min_agree": GAP_CONSENSUS_MIN_AGREE,
+                                   "dropped_single_run_gaps": _dropped}
+
+    # Claim-level verification: does each cited paper's abstract actually support the gap, and does the
+    # recent literature already address it? (claim_check.py) Never fails the analysis.
+    try:
+        merged["research_gaps"], merged["claim_check"] = claim_check.annotate_gaps(
+            merged["research_gaps"], papers, llm_json_fn=_claim_judge(client))
+    except GroqQuotaExhausted:
+        print("[claim-check] Groq quota exhausted - gaps are returned without claim labels")
+    except Exception as e:
+        print(f"[claim-check] skipped: {type(e).__name__}: {e}")
+
     result = merged
     _finish_gap_analysis_with_novelty(result, pdf_text, topic, papers, primary_domain)
     return result
 
 
-def _analyze_gaps_batch_with_groq(client, topic, pdf_excerpt, papers, kw_str, theme='', n_gaps=6, exclude_titles=None):
-    paper_titles = "\n".join([f"- {p['title']} ({p['year']})" for p in papers])
+def _analyze_gaps_batch_with_groq(client, topic, pdf_excerpt, papers, kw_str, theme='', n_gaps=6, exclude_titles=None,
+                                  temperature=0.3):
+    # Cite by ID, not by title: the model sees [P1]..[Pn] and must answer with those IDs, so a
+    # hallucinated paper title can never become "evidence" (claim_check.resolve_evidence_ids).
+    id_map = claim_check.build_id_map(papers)
+    paper_titles = claim_check.paper_id_lines(papers, id_map)
     theme_line = (f"THEME OF THIS BATCH (key terms shared by these papers): {theme}\n"
                   f"Focus on gaps specific to this theme.\n") if theme else ""
     exclude_line = ("ALREADY FOUND GAPS (do NOT repeat or rephrase any of these; find DIFFERENT ones):\n"
@@ -1552,6 +1603,7 @@ EXISTING RELATED PAPERS:
 {paper_titles}
 KEY CONCEPTS FOUND: {kw_str}
 {theme_line}{exclude_line}
+EVIDENCE RULE: every paper above starts with an ID such as [P3]. In "evidence_ids" list ONLY IDs that appear above (1-3 per gap, the papers whose content actually shows the gap). Never write a paper title and never invent an ID.
 IMPORTANT: Based on the related papers and the topic provided, identify BETWEEN {lo} AND {hi} distinct, non-overlapping research gaps from THIS batch of papers (results from other batches of the same corpus are merged separately). Each gap must be genuinely different from the others, covering a different sub-theme, methodology, application domain, or limitation. Keep EVERY text field to ONE concise sentence (about 25 words at most) so that all the gaps fit in the reply.
 
 Provide a detailed JSON response (no markdown, pure JSON):
@@ -1570,7 +1622,7 @@ Provide a detailed JSON response (no markdown, pure JSON):
       "why_important": "Why filling this gap matters",
       "suggested_approach": "How to address this gap",
       "estimated_impact": "Expected contribution",
-      "evidence_papers": ["actual paper title from the list above", "another actual paper title"],
+      "evidence_ids": ["P3", "P17"],
       "evidence_explanation": "How these specific papers show the gap exists",
       "evidence_quote": "If (and only if) the USER'S PAPER EXCERPT above directly supports this gap, copy an EXACT short quote (max 25 words) verbatim from it. If no exact supporting quote exists in the excerpt, use an empty string - do NOT paraphrase or invent one.",
       "evidence_page": "The [PAGE n] number the quote appeared under in the excerpt, as an integer, or null if evidence_quote is empty",
@@ -1593,7 +1645,7 @@ Provide a detailed JSON response (no markdown, pure JSON):
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role":"user","content":prompt}],
-            temperature=0.3, max_tokens=max_out
+            temperature=temperature, max_tokens=max_out
         )
     except GroqQuotaExhausted:
         raise
@@ -1602,7 +1654,10 @@ Provide a detailed JSON response (no markdown, pure JSON):
         # whole run — the caller just merges whatever batches succeeded.
         print(f"[gap-analysis-batch] skipped a batch after Groq error: {e}")
         return None
-    return _parse_groq_json(response.choices[0].message.content, "gap-analysis-batch")
+    parsed = _parse_groq_json(response.choices[0].message.content, "gap-analysis-batch")
+    if isinstance(parsed, dict):
+        claim_check.resolve_all(parsed.get("research_gaps", []), id_map)
+    return parsed
 
 
 def _finish_gap_analysis_with_novelty(result, pdf_text, topic, papers, primary_domain):
@@ -1883,19 +1938,22 @@ def analyze_deep_research_gaps_with_groq(api_key, topic, papers, trend_stats, cu
     validation afterwards still checks every collected paper.
     """
     client = Groq(api_key=api_key)
+    evidence_papers = papers[:max_evidence_papers] if max_evidence_papers else papers
+    # Cite by ID: each evidence paper is shown as [Pn] and the model answers with IDs only.
+    id_map = claim_check.build_id_map(evidence_papers)
+    _ids = claim_check.id_of(id_map)
     line_fn = lambda p: (
-        f"- {p['title']} ({p.get('year','N/A')}, {p.get('source','')}, "
+        f"- [{_ids.get(id(p), '?')}] {p['title']} ({p.get('year','N/A')}, {p.get('source','')}, "
         f"impact_score={p.get('impact_score', 0)}"
         f"{', citations=' + str(int(p['citation_count'])) if p.get('citation_count') is not None else ''})"
     )
-    evidence_papers = papers[:max_evidence_papers] if max_evidence_papers else papers
     batches = list(_chunk_papers_by_token_budget(evidence_papers, line_fn, reserved_tokens=4200, overhead_tokens=1400))
     merged = {"research_gaps": []}
     got_headline_fields = False
     succeeded = 0
     for i, batch in enumerate(batches):
         result = _analyze_deep_gaps_batch_with_groq(
-            client, topic, papers, batch, trend_stats, current_trends, forecast, line_fn
+            client, topic, papers, batch, trend_stats, current_trends, forecast, line_fn, id_map=id_map
         )
         if result is None:
             continue
@@ -1917,10 +1975,19 @@ def analyze_deep_research_gaps_with_groq(api_key, topic, papers, trend_stats, cu
             f"[deep-gap-analysis-batch] log lines above for the underlying Groq error."
         )
     merged["research_gaps"] = _dedupe_gaps(merged["research_gaps"])
+    # Claim-level verification against the FULL corpus (abstract support + semantic already-addressed).
+    try:
+        merged["research_gaps"], merged["claim_check"] = claim_check.annotate_gaps(
+            merged["research_gaps"], papers, llm_json_fn=_claim_judge(client))
+    except GroqQuotaExhausted:
+        print("[claim-check] Groq quota exhausted - gaps are returned without claim labels")
+    except Exception as e:
+        print(f"[claim-check] skipped: {type(e).__name__}: {e}")
     return merged
 
 
-def _analyze_deep_gaps_batch_with_groq(client, topic, all_papers, top_evidence, trend_stats, current_trends, forecast, line_fn):
+def _analyze_deep_gaps_batch_with_groq(client, topic, all_papers, top_evidence, trend_stats, current_trends, forecast, line_fn,
+                                       id_map=None):
     papers = all_papers  # used below for len(papers) in the prompt's corpus-size line
     paper_lines = "\n".join(line_fn(p) for p in top_evidence)
     rising = ", ".join(trend_stats.get('rising_keywords', [])[:20]) or "none detected"
@@ -1983,6 +2050,8 @@ KEYWORD TREND SIGNAL (computed directly from word/keyword frequencies across the
 {current_trends_block}
 {forecast_block}
 
+EVIDENCE RULE: every paper above starts with an ID such as [P3]. In "evidence_ids" list ONLY IDs that appear above (1-3 per gap). Never write a paper title and never invent an ID.
+
 IMPORTANT: Ground each gap in this real trend signal — explain it in terms of what the field is now moving toward (rising/fastest-growing/impact-weighted keywords) versus what it has already saturated (entrenched/declining keywords), and note any relevant co-occurrence pattern (e.g. two terms that are NOT yet co-occurring, despite both being prominent, is itself a gap signal). Give a near-term forward-looking prediction for each gap. Identify BETWEEN 3 AND 6 distinct, non-overlapping research gaps from THIS batch of evidence (results from other batches of the same corpus are merged separately, so keep this batch's response focused and complete rather than exhaustive).
 
 Provide a detailed JSON response (no markdown, pure JSON):
@@ -2003,7 +2072,7 @@ Provide a detailed JSON response (no markdown, pure JSON):
       "why_important": "Why filling this gap matters",
       "suggested_approach": "How to address this gap",
       "estimated_impact": "Expected contribution",
-      "evidence_papers": ["actual paper title from the list above", "another actual paper title"],
+      "evidence_ids": ["P3", "P17"],
       "confidence_score": 85,
       "lags_current_developments": "If live-search evidence was provided above: does the literature already reflect it, or lag behind it? Empty string if no live-search evidence was provided."
     }}
@@ -2023,7 +2092,10 @@ Provide a detailed JSON response (no markdown, pure JSON):
     except Exception as e:
         print(f"[deep-gap-analysis-batch] skipped a batch after Groq error: {e}")
         return None
-    return _parse_groq_json(response.choices[0].message.content, "deep-gap-analysis-batch")
+    parsed = _parse_groq_json(response.choices[0].message.content, "deep-gap-analysis-batch")
+    if isinstance(parsed, dict) and id_map:
+        claim_check.resolve_all(parsed.get("research_gaps", []), id_map)
+    return parsed
 
 
 def generate_pdf_report(topic, analysis, papers, report_path):

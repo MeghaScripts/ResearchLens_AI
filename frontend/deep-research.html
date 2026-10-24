@@ -294,6 +294,7 @@ function renderResults(data) {
       <div class="dr-chips">
         ${v.is_recently_active ? '<span class="dr-chip">recent corpus evidence</span>' : ''}
         ${v.appears_already_addressed ? '<span class="dr-chip">looks already addressed</span>' : ''}
+        ${v.claim_support ? `<span class="dr-chip" title="${esc(v.claim_support_reason || '')}">claim: ${esc(v.claim_support)}</span>` : ''}
         ${g.near_term_prediction ? `<span class="dr-chip">${esc(g.near_term_prediction).slice(0, 80)}</span>` : ''}
       </div>
     </div>`;

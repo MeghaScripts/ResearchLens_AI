@@ -1851,6 +1851,16 @@ def validate_and_prioritize_gaps(gaps, papers, trend_stats):
             and validation['evidence_appears_interconnected'] is True
             and validation['is_recently_active']
         )
+        # Claim-level signals written by claim_check.annotate_gaps (None when that step did not run).
+        cc = gap.get('claim_check') or {}
+        validation['claim_support'] = cc.get('label')
+        validation['claim_support_reason'] = cc.get('reason')
+        validation['semantic_addressed'] = cc.get('semantic_addressed')
+        validation['addressed_by'] = cc.get('addressed_by') or []
+        if cc.get('semantic_addressed') is True:
+            # Embedding/TF-IDF similarity found >= 2 recent papers that look like this gap: strengthens
+            # the citation-graph heuristic above instead of replacing it.
+            appears_already_addressed = True
         validation['appears_already_addressed'] = appears_already_addressed
         validation['evidence_papers_cited'] = len(cited)
         validation['evidence_papers_verified'] = len(verified_titles)
@@ -1876,8 +1886,13 @@ def validate_and_prioritize_gaps(gaps, papers, trend_stats):
         # signals at once — this is meant to visibly de-rank those
         # gaps rather than just slightly discount them.
         already_addressed_penalty = 0.25 if appears_already_addressed else 0.0
+        # Claim support: an unsupported or contradicted claim is de-ranked, a supported one nudged up.
+        # 'unverifiable' (no abstract / judge unavailable) is neutral - could-not-check is not failed.
+        import claim_check as _cc
+        claim_adjustment = _cc.PRIORITY_ADJUSTMENT.get(validation.get('claim_support'), 0.0)
         gap['priority_score'] = round(100 * max(0.0, 0.5 * confidence + 0.35 * evidence_norm
                                                   + recency_bonus + interconnection_adjustment
+                                                  + claim_adjustment
                                                   - already_addressed_penalty), 1)
 
     gaps.sort(key=lambda g: g.get('priority_score', 0), reverse=True)
