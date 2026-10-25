@@ -38,30 +38,44 @@ def _fresh_paper(rec):
     return p
 
 
-def evaluate(records, auth_min=None, rel_min=None):
-    """Run verify_papers over `records` (grouped by topic, as the app does) and return per-record
-    predictions: [{'id','category','label','prediction','status'}]. Thresholds default to the shipped ones."""
+def verify_once(records):
+    """Run the full (network/cache-backed) verification ONCE per topic group. -> [(record, paper)].
+    The expensive part; thresholds are applied afterwards by decide(), which is instant."""
+    by_topic = {}
+    for r in records:
+        by_topic.setdefault(r.get('topic') or '', []).append(r)
+    pairs = []
+    for topic, group in by_topic.items():
+        papers = [_fresh_paper(r) for r in group]
+        pv.verify_papers(papers, topic, network_top_n=0)
+        truth = {r['id']: r for r in group}
+        pairs.extend((truth[p['_eval_id']], p) for p in papers)
+    return pairs
+
+
+def decide(pairs, auth_min=None, rel_min=None):
+    """Re-apply the verdict rules to already-verified papers with the given thresholds (defaults: the
+    shipped ones) -> [{'id','category','label','prediction','status'}]. decide_verdict only reads scores
+    already stored on the paper, so this is exactly what a full re-run would give, without the cost."""
     old = (pv.AUTHENTICITY_REJECT_THRESHOLD, pv.RELEVANCE_DISCARD_THRESHOLD)
     if auth_min is not None:
         pv.AUTHENTICITY_REJECT_THRESHOLD = auth_min
     if rel_min is not None:
         pv.RELEVANCE_DISCARD_THRESHOLD = rel_min
     try:
-        by_topic = {}
-        for r in records:
-            by_topic.setdefault(r.get('topic') or '', []).append(r)
         out = []
-        for topic, group in by_topic.items():
-            papers = [_fresh_paper(r) for r in group]
-            pv.verify_papers(papers, topic, network_top_n=0)
-            truth = {r['id']: r for r in group}
-            for p in papers:
-                r = truth[p['_eval_id']]
-                out.append({'id': r['id'], 'category': r['category'], 'label': r['label'],
-                            'prediction': pv.decision_band(p), 'status': p.get('verification_status')})
+        for rec, paper in pairs:
+            pv.decide_verdict(paper)
+            out.append({'id': rec['id'], 'category': rec['category'], 'label': rec['label'],
+                        'prediction': pv.decision_band(paper), 'status': paper.get('verification_status')})
         return out
     finally:
         pv.AUTHENTICITY_REJECT_THRESHOLD, pv.RELEVANCE_DISCARD_THRESHOLD = old
+
+
+def evaluate(records, auth_min=None, rel_min=None):
+    """Verify `records` and return per-record predictions at the given thresholds."""
+    return decide(verify_once(records), auth_min, rel_min)
 
 
 def _score(preds):
@@ -71,11 +85,13 @@ def _score(preds):
 def tune(train, target=0.95, auth_grid=AUTH_GRID, rel_grid=REL_GRID):
     """Grid-search the two thresholds on TRAIN. Objective: highest coverage among settings whose decisive
     accuracy reaches `target`; if none reaches it, the highest decisive accuracy (coverage breaks ties).
+    The papers are verified once; each grid point only re-applies the verdict rules (instant).
     -> (best, table) with best = {'auth_min','rel_min','coverage','decisive_accuracy','met_target'}."""
+    pairs = verify_once(train)
     table = []
     for a in auth_grid:
         for r in rel_grid:
-            s = _score(evaluate(train, a, r))
+            s = _score(decide(pairs, a, r))
             table.append({'auth_min': a, 'rel_min': r, 'coverage': s['coverage'],
                           'decisive_accuracy': s['decisive_accuracy'], 'decided': s['decided']})
     ok = [t for t in table if t['decided'] and t['decisive_accuracy'] >= target]
@@ -91,13 +107,18 @@ def tune(train, target=0.95, auth_grid=AUTH_GRID, rel_grid=REL_GRID):
 
 def run(args):
     handle = registry_cache.install(args.cache, cache_only=args.cache_only)
+    if args.strict:
+        pv.STRICT_FIELD_REJECT = True
+        print('[eval] STRICT mode: one severe title/author mismatch against the resolved registry record rejects')
     try:
         records = load_jsonl(args.data)
         train, test = split_train_test(records, test_fraction=0.30, seed=args.seed)
         print(f'[eval] {len(records)} records -> train {len(train)} / test {len(test)}')
 
-        report = {'n_total': len(records), 'n_train': len(train), 'n_test': len(test), 'target': args.target}
-        base_preds = evaluate(test)
+        report = {'n_total': len(records), 'n_train': len(train), 'n_test': len(test), 'target': args.target,
+                  'strict': bool(args.strict)}
+        test_pairs = verify_once(test)
+        base_preds = decide(test_pairs)
         base = _score(base_preds)
         report['baseline_test'] = base
         report['baseline_test_by_category'] = metrics.by_category(base_preds)
@@ -110,7 +131,7 @@ def run(args):
             print(f"\n[tune] best on TRAIN: authenticity>={best['auth_min']}, relevance>={best['rel_min']}, "
                   f"train coverage {best['coverage']:.1%}, train decisive accuracy {best['decisive_accuracy']:.1%}"
                   f"{'' if best['met_target'] else '  (target NOT reached)'}")
-            tuned_preds = evaluate(test, best['auth_min'], best['rel_min'])
+            tuned_preds = decide(test_pairs, best['auth_min'], best['rel_min'])
             tuned = _score(tuned_preds)
             report['tuned_test'] = tuned
             report['tuned_test_by_category'] = metrics.by_category(tuned_preds)
@@ -138,6 +159,7 @@ def main(argv=None):
     ap.add_argument('--out', default='eval/results.json')
     ap.add_argument('--tune', action='store_true', help='search thresholds on the train split')
     ap.add_argument('--target', type=float, default=0.95, help='decisive-accuracy target for --tune')
+    ap.add_argument('--strict', action='store_true', help='reject on one severe title/author mismatch (opt-in rule)')
     ap.add_argument('--cache-only', action='store_true', help='never call the network; misses act as unreachable')
     ap.add_argument('--seed', type=int, default=13)
     run(ap.parse_args(argv))

@@ -13,6 +13,10 @@ All notable changes. Format: [Keep a Changelog](https://keepachangelog.com), ver
 ### Fixed
 - `verify_papers` no longer aborts when a registry client raises unexpectedly (`_guarded`), and accepts a non-string DOI.
 - Daily scheduler now starts on hosts with a non-zoneinfo timezone name (`BackgroundScheduler(timezone='UTC')`).
+### Changed (this round)
+- arXiv multi-source fetch retries (https x2, then http) with `ARXIV_TIMEOUT` (default 20 s) instead of one 8 s attempt; the "could not reach any source" message now separates failures from sources skipped for a missing API key.
+- Opt-in `DEEP_STRICT_FIELD_REJECT=1` (and `python -m eval.run_eval --strict`): reject on one severe title/author mismatch against the registry record the identifier resolves to. Off by default.
+- `eval.run_eval --tune` verifies once and re-applies thresholds instantly.
 ### Added (reliability)
 - `tests/test_reliability.py` fault-injection tests, `scripts/load_test.py`, `docs/SCALABILITY_RELIABILITY.md`.
 ### Changed

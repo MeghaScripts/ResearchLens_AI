@@ -230,6 +230,12 @@ def valid_identifier(value, kind='doi'):
         return bool(re.match(r'^10\.\d{4,9}/\S+$', str(value).strip()))
     raise ValueError(f"valid_identifier: unknown kind {kind!r}")
 RELEVANCE_DISCARD_THRESHOLD = float(os.environ.get('DEEP_RELEVANCE_MIN', '35'))
+# Opt-in (default OFF): reject on ONE severe field mismatch against a registry record that the paper's own
+# identifier resolved to - a title that is almost unrelated to the registry's, or an author list sharing no
+# name at all with it. Default OFF because a real paper with a translated title can trip the title rule;
+# measure it with `python -m eval.run_eval --strict` before turning it on.
+STRICT_FIELD_REJECT = os.environ.get('DEEP_STRICT_FIELD_REJECT', '0').lower() in ('1', 'true', 'yes')
+SEVERE_TITLE_RATIO = float(os.environ.get('DEEP_SEVERE_TITLE_RATIO', '0.5'))
 # Highest authenticity a paper can reach when NOTHING independent
 # corroborated it (single source, no resolvable identifier). Chosen to
 # sit below AUTHENTICITY_REJECT_THRESHOLD so such papers are always
@@ -530,6 +536,34 @@ def _surnames(authors):
 def _year_int(value):
     m = re.search(r'\b(1[6-9]\d{2}|20\d{2}|21\d{2})\b', str(value or ''))
     return int(m.group(1)) if m else None
+
+
+def _name_tokens(authors):
+    """Every alphabetic name token of length >= 3, so the comparison survives name order ("Wang Wei" vs
+    "Wei Wang"), initials ("J. Smith" vs "John Smith") and abbreviated author lists."""
+    out = set()
+    for a in authors or []:
+        if isinstance(a, str):
+            out |= {t for t in re.findall(r"[^\W\d_]{3,}", a.lower())}
+    return out
+
+
+def _severe_mismatches(paper, registries):
+    """Fields that are not merely different but unrelated to what a registry holds for this record:
+    'title' (similarity below SEVERE_TITLE_RATIO) and 'authors' (>= 2 name tokens on our side, none shared
+    with any registry's author list). [] when no registry record was found."""
+    live = [r for r in registries if r and r.get('found')]
+    if not live:
+        return []
+    out = []
+    ratios = [x for x in (_ratio(paper.get('title'), r.get('title')) for r in live) if x is not None]
+    if ratios and max(ratios) < SEVERE_TITLE_RATIO:
+        out.append('title')
+    ours = _name_tokens(paper.get('authors'))
+    theirs = [t for t in (_name_tokens(r.get('authors')) for r in live) if t]
+    if len(ours) >= 2 and theirs and all(not (ours & t) for t in theirs):
+        out.append('authors')
+    return out
 
 
 def _paper_identifiers(paper):
@@ -1360,6 +1394,7 @@ def compute_authenticity(paper, crossref=None, openalex=None, s2=None, s2_answer
     paper['authenticity_basis'] = basis
     paper['authenticity_checked_weight_pct'] = round(checkable, 1)
     paper['authenticity_contradictions'] = contradictions
+    paper['authenticity_severe_mismatches'] = _severe_mismatches(paper, all_registries)
     # Generalized beyond DOI now that this check also covers arXiv IDs
     # (via Semantic Scholar), DBLP keys, PMIDs, OpenAlex IDs, S2 IDs,
     # CORE IDs and INSPIRE IDs — the verdict text names whichever
@@ -1827,6 +1862,13 @@ def decide_verdict(paper):
         status = 'REJECTED'
         reasons.append('metadata contradicted by an independent registry on '
                        + ', '.join(contradictions) + ' — the DOI resolves to a different work')
+
+    severe = paper.get('authenticity_severe_mismatches') or []
+    if (status is None and STRICT_FIELD_REJECT and severe
+            and paper.get('authenticity_basis') in ('registry_verified', 'bibliographic_match_verified')):
+        status = 'REJECTED'
+        reasons.append('strict mode: ' + ' and '.join(severe) + ' on this record is unrelated to the '
+                       'registry record its identifier resolves to')
 
     if status is None and paper.get('authenticity_identifier_unresolved'):
         id_type = paper.get('authenticity_failed_identifier_type')

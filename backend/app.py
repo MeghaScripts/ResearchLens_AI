@@ -694,9 +694,26 @@ def _fetch_arxiv_for_multi(topic, max_results, offset=0):
     citation-count field, so citation_count is left unset for these papers
     (impact scoring falls back to recency-only for arXiv results)."""
     query = topic.replace(' ', '+')
-    url = f"https://export.arxiv.org/api/query?search_query=all:{query}&start={max(0, offset)}&max_results={max_results}&sortBy=submittedDate&sortOrder=descending"
-    resp = requests.get(url, timeout=8, headers={'User-Agent': 'ResearchLensAI/1.0 (mailto:research@example.com)'})
-    resp.raise_for_status()
+    qs = f"search_query=all:{query}&start={max(0, offset)}&max_results={max_results}&sortBy=submittedDate&sortOrder=descending"
+    # arXiv's export endpoint is intermittently slow, so a single 8 s attempt failed often. Try https twice
+    # (with a short pause) then plain http, each with ARXIV_TIMEOUT seconds (default 20), and raise only
+    # when every try failed.
+    tries = [f"https://export.arxiv.org/api/query?{qs}", f"https://export.arxiv.org/api/query?{qs}",
+             f"http://export.arxiv.org/api/query?{qs}"]
+    timeout = float(os.environ.get('ARXIV_TIMEOUT', '20'))
+    last_error = None
+    resp = None
+    for n, url in enumerate(tries):
+        try:
+            resp = requests.get(url, timeout=timeout, headers={'User-Agent': 'ResearchLensAI/1.0 (mailto:research@example.com)'})
+            resp.raise_for_status()
+            break
+        except Exception as e:
+            last_error, resp = e, None
+            if n < len(tries) - 1:
+                time.sleep(1.5)
+    if resp is None:
+        raise last_error
     papers = _parse_arxiv_xml(resp.text)
     for p in papers:
         p['source'] = 'arXiv'
@@ -942,14 +959,17 @@ def fetch_papers_multi_source(topic, max_results=50, sources=None, venue_filter=
             label = next(iter(sources_used))
         else:
             label = 'your selected sources'
-        raise ArxivUnavailableError(
-            "Could not reach any academic source. "
-            f"Errors: {'; '.join(errors)}. This is likely a network/firewall issue "
-            "blocking academic API domains, or the sources you selected all need an "
-            "API key that isn't configured — try a different network, check your "
-            "selected sources, and retry.",
-            source_label=label,
-        )
+        skipped = [e for e in errors if ': skipped' in e]
+        failed = [e for e in errors if ': skipped' not in e]
+        parts = ["Could not reach any academic source."]
+        if failed:
+            parts.append(f"Failed: {'; '.join(failed)}.")
+        if skipped:
+            parts.append(f"Skipped because no API key is configured: {'; '.join(skipped)}.")
+        parts.append("Tip: tick free sources that need no key (Crossref, PubMed, Europe PMC, DOAJ) alongside ArXiv, "
+                     "and retry - ArXiv is sometimes slow. A network/firewall blocking academic API domains "
+                     "produces the same message.")
+        raise ArxivUnavailableError(" ".join(parts), source_label=label)
 
     return combined[:max_results]
 
@@ -1130,7 +1150,7 @@ def fetch_arxiv_papers(topic, max_results=50):
     for endpoint_idx, url in enumerate(endpoints):
         for attempt in range(2):  # 2 attempts per endpoint — faster failover to Semantic Scholar
             try:
-                resp = requests.get(url, timeout=8, headers={'User-Agent': 'ResearchLensAI/1.0 (mailto:research@example.com)'})
+                resp = requests.get(url, timeout=float(os.environ.get('ARXIV_TIMEOUT', '20')), headers={'User-Agent': 'ResearchLensAI/1.0 (mailto:research@example.com)'})
                 resp.raise_for_status()
                 papers = _parse_arxiv_xml(resp.text)
                 if papers:

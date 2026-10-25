@@ -137,3 +137,45 @@ def test_registry_cache_records_then_replays(tmp_path, monkeypatch):
         assert calls == []
     finally:
         h2.restore()
+
+
+# ─── fast tuning and the opt-in strict rule ────────────────────────
+def test_decide_matches_a_full_rerun(monkeypatch):
+    _stub_registries(monkeypatch)
+    recs = bes.make_dataset(_real(), _retracted(), n_bad=8, seed=7)
+    pairs = run_eval.verify_once(recs)
+    fast = run_eval.decide(pairs, auth_min=60, rel_min=20)
+    full = run_eval.evaluate(recs, auth_min=60, rel_min=20)
+    assert [(p['id'], p['prediction']) for p in fast] == [(p['id'], p['prediction']) for p in full]
+
+
+def _registry_record(title, authors):
+    return {'found': True, 'title': title, 'authors': authors, 'year': 2022, 'venue': 'J'}
+
+
+def test_severe_mismatch_detection():
+    paper = {'title': 'Federated learning for medical imaging privacy across hospitals',
+             'authors': ['Alice Nguyen', 'Bob Okafor', 'Chen Wei']}
+    same = _registry_record(paper['title'], ['Alice Nguyen', 'Bob Okafor', 'Chen Wei'])
+    assert pv._severe_mismatches(paper, [same]) == []
+    reordered = _registry_record(paper['title'], ['Wei Chen', 'Nguyen Alice'])        # name order differs
+    assert pv._severe_mismatches(paper, [reordered]) == []
+    truncated = _registry_record('Federated learning for medical imaging privacy', paper['authors'])
+    assert pv._severe_mismatches(paper, [truncated]) == []
+    swapped = _registry_record(paper['title'], ['Dmitri Volkov', 'Priya Raman'])
+    assert pv._severe_mismatches(paper, [swapped]) == ['authors']
+    scrambled = _registry_record('Adaptive hospitals imaging for privacy learning medical across Federated', paper['authors'])
+    assert pv._severe_mismatches(paper, [scrambled]) == ['title']
+    assert pv._severe_mismatches(paper, []) == []                                      # no registry record -> no claim
+    assert pv._severe_mismatches(paper, [{'found': False}]) == []
+
+
+def test_strict_rule_is_off_by_default_and_rejects_only_when_enabled(monkeypatch):
+    paper = {'title': 't', 'authenticity_severe_mismatches': ['authors'], 'authenticity_basis': 'registry_verified',
+             'authenticity_score': 80, 'relevance_score': 90, 'quality_score': 50, 'authenticity_contradictions': ['authors_match']}
+    monkeypatch.setattr(pv, 'STRICT_FIELD_REJECT', False)
+    assert pv.decide_verdict(dict(paper))['verification_status'] == 'PARTIALLY_VERIFIED'
+    monkeypatch.setattr(pv, 'STRICT_FIELD_REJECT', True)
+    assert pv.decide_verdict(dict(paper))['verification_status'] == 'REJECTED'
+    unsure = dict(paper, authenticity_basis='uncorroborated_single_source')            # no registry vouched for the record
+    assert pv.decide_verdict(unsure)['verification_status'] != 'REJECTED'
