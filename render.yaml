@@ -16,8 +16,8 @@ services:
       - key: LOG_LEVEL
         value: INFO
       - key: GAPS_TARGET
-        value: "15"
+        value: "50"
       - key: MAX_GAP_BATCHES
-        value: "3"
+        value: "8"
     healthCheckPath: /health
     autoDeploy: true

@@ -13,6 +13,8 @@ All notable changes. Format: [Keep a Changelog](https://keepachangelog.com), ver
 ### Fixed
 - `verify_papers` no longer aborts when a registry client raises unexpectedly (`_guarded`), and accepts a non-string DOI.
 - Daily scheduler now starts on hosts with a non-zoneinfo timezone name (`BackgroundScheduler(timezone='UTC')`).
+### Fixed (gap count)
+- The gap list could stop far below the 50-gap target: top-up rounds counted gaps before the grounding filter removed ungrounded ones, only ran twice, and `render.yaml` capped the target at 15 (`GAPS_TARGET`) and 3 batches. Top-up now counts grounded gaps, runs up to `GAP_TOPUP_ROUNDS` (6) with early stop, asks `GAP_OVERASK` x the target up front, caps once at the end by slicing, and reports `gap_target` (target, found, why it stopped) which the overview tile shows when short. `render.yaml` now sets 50 gaps / 8 batches.
 ### Added (per-level evaluation)
 - `eval/run_levels.py`: authenticity, relevance and quality measured separately; `eval/relevance_eval.py` (pair-based relevance eval, weight and cutoff fitting), `eval/quality_eval.py` (rating sheet, kappa, Spearman, ridge fit), `eval/fit.py` (pure-Python AUC, Spearman, kappa, logistic and ridge).
 - `eval.run_eval --cv K` pooled k-fold evaluation; `--drop-cache`.

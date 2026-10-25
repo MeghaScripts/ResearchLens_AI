@@ -1413,6 +1413,9 @@ MAX_GAP_BATCHES = int(os.environ.get('MAX_GAP_BATCHES', '8'))
 # Independent gap-generation runs used for agreement filtering (1 = off). Each extra run repeats every
 # batch call, so it multiplies the Groq budget; keep 1 on the free tier unless you need the filter.
 GAP_CONSENSUS_RUNS = max(1, int(os.environ.get('GAP_CONSENSUS_RUNS', '1')))
+# Extra rounds asking Groq for MORE gaps when grounding/de-duplication left fewer than GAPS_TARGET.
+GAP_TOPUP_ROUNDS = max(0, int(os.environ.get('GAP_TOPUP_ROUNDS', '6')))
+GAP_OVERASK = float(os.environ.get('GAP_OVERASK', '1.6'))    # ask for this multiple of the target up front
 GAP_CONSENSUS_MIN_AGREE = int(os.environ.get('GAP_CONSENSUS_MIN_AGREE', '2'))
 
 
@@ -1500,7 +1503,7 @@ def analyze_gaps_with_groq(api_key, topic, pdf_text, papers, keywords, primary_d
     pdf_excerpt = pdf_text[:3000] if pdf_text else "No PDF provided."
     batches = _plan_gap_batches_capped(papers)
     # each batch is asked for enough gaps that the merged, de-duplicated list reaches GAPS_TARGET
-    n_ask = max(4, min(12, _math_gap.ceil(GAPS_TARGET * 1.3 / max(1, len(batches)))))
+    n_ask = max(4, min(12, _math_gap.ceil(GAPS_TARGET * GAP_OVERASK / max(1, len(batches)))))
     print(f"[gap-analysis] {len(papers)} papers -> {len(batches)} batch(es), asking ~{n_ask} gaps each (target {GAPS_TARGET})")
     merged = {"research_gaps": [], "existing_coverage": [], "emerging_trends": []}
     got_headline_fields = False
@@ -1527,37 +1530,61 @@ def analyze_gaps_with_groq(api_key, topic, pdf_text, papers, keywords, primary_d
             f"either errored or returned bad JSON. Check the [gap-analysis-batch] log "
             f"lines above for the underlying Groq error."
         )
-    merged["research_gaps"] = _dedupe_gaps(merged["research_gaps"])
+    # Work with up to twice the target while generating: de-duplication ranks by severity, so capping at the
+    # target BEFORE grounding could throw away grounded gaps in favour of ungrounded ones. The final cap
+    # (GAPS_TARGET) is applied once, after grounding.
+    work_cap = GAPS_TARGET * 2
+    merged["research_gaps"] = _dedupe_gaps(merged["research_gaps"], max_gaps=work_cap)
+    _kept_g, _rej_g = paper_quality.ground_gaps(merged["research_gaps"], papers)
 
-    # Top-up: if de-duplication left fewer than the target, ask again (excluding what we already have).
-    rounds = 0
-    while len(merged["research_gaps"]) < GAPS_TARGET and rounds < 2 and batches:
-        need = GAPS_TARGET - len(merged["research_gaps"])
+    # Top-up until the number of GROUNDED, distinct gaps reaches the target (grounding is what removes gaps,
+    # so it is what has to be counted). Rounds rotate over the batches; the model is told every title found
+    # so far, including rejected ones, so it does not repeat them. Stops early after two rounds that add
+    # nothing, when Groq's quota runs out, or after GAP_TOPUP_ROUNDS.
+    rounds = stale = 0
+    stop_reason = 'target reached' if len(_kept_g) >= GAPS_TARGET else 'no more distinct gaps found'
+    while len(_kept_g) < GAPS_TARGET and rounds < GAP_TOPUP_ROUNDS and batches:
+        if stale >= 2:
+            stop_reason = 'two rounds in a row produced no new evidence-backed gaps'
+            break
+        need = GAPS_TARGET - len(_kept_g)
         batch, theme = batches[rounds % len(batches)]
         titles = [g.get('gap_title', '') for g in merged["research_gaps"]]
         rounds += 1
         time.sleep(2.5)
         try:
             extra = _analyze_gaps_batch_with_groq(client, topic, pdf_excerpt, batch, kw_str, theme=theme,
-                                                  n_gaps=min(12, need + 2), exclude_titles=titles)
+                                                  n_gaps=min(12, need + 3), exclude_titles=titles)
         except GroqQuotaExhausted:
             print("[gap-analysis] quota exhausted during top-up — keeping the gaps found so far")
+            stop_reason = 'Groq quota exhausted'
             break
-        if extra is None:
-            continue
-        merged["research_gaps"].extend(extra.get("research_gaps", []))
-        merged["research_gaps"] = _dedupe_gaps(merged["research_gaps"])
-    print(f"[gap-analysis] final: {len(merged['research_gaps'])} gaps (target {GAPS_TARGET})")
+        before = len(_kept_g)
+        if extra is not None:
+            merged["research_gaps"].extend(extra.get("research_gaps", []))
+            merged["research_gaps"] = _dedupe_gaps(merged["research_gaps"], max_gaps=work_cap)
+            _kept_g, _rej_g = paper_quality.ground_gaps(merged["research_gaps"], papers)
+        stale = stale + 1 if len(_kept_g) <= before else 0
+        if len(_kept_g) >= GAPS_TARGET:
+            stop_reason = 'target reached'
+    else:
+        if len(_kept_g) < GAPS_TARGET and rounds >= GAP_TOPUP_ROUNDS:
+            stop_reason = f'reached the {GAP_TOPUP_ROUNDS}-round top-up limit'
 
-    _kept_g, _rej_g = paper_quality.ground_gaps(merged["research_gaps"], papers)
     if _kept_g:
-        merged["research_gaps"] = _kept_g
+        # Already de-duplicated and ranked above; a second dedupe pass would re-score similarity on this smaller
+        # list (TF-IDF weights shift) and could drop gaps we just counted. So the final cap is a plain slice.
+        merged["research_gaps"] = _kept_g[:GAPS_TARGET]
     merged["grounding"] = {
         "kept": len(merged["research_gaps"]),
         "rejected": len(_rej_g),
         "rejected_gaps": _rej_g[:25],
         "all_rejected_kept_unfiltered": (not _kept_g) and bool(_rej_g),
     }
+    # Tell the UI honestly whether the target was met and, if not, why (shown instead of silently showing fewer).
+    merged["gap_target"] = {"target": GAPS_TARGET, "found": len(merged["research_gaps"]),
+                            "topup_rounds": rounds, "papers_analysed": len(papers), "stopped_because": stop_reason}
+    print(f"[gap-analysis] final: {len(merged['research_gaps'])} grounded gaps (target {GAPS_TARGET}); {stop_reason}")
     if _rej_g:
         print(f"[gap-analysis] grounding removed {len(_rej_g)} gap(s) not backed by collected papers")
 

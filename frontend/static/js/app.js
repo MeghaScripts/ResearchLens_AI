@@ -417,6 +417,19 @@ function renderResults(data) {
 
   animateMetric('noveltyScore', analysis.novelty_score||0, 'noveltyFill', analysis.novelty_score||0);
   animateMetric('gapsCount', (analysis.research_gaps||[]).length, 'gapsFill', (analysis.research_gaps||[]).length*20);
+  // Say honestly when fewer gaps than the target exist, and why (backend gap_target block).
+  (function () {
+    const sub = document.querySelector('#gapsCount')?.closest('.metric-card')?.querySelector('.metric-sub');
+    const gt = analysis.gap_target;
+    if (!sub) return;
+    if (gt && gt.found < gt.target) {
+      sub.textContent = `Unexplored areas — target ${gt.target}; stopped: ${gt.stopped_because}`;
+      sub.title = `${gt.found} distinct, evidence-backed gaps from ${gt.papers_analysed} papers after ${gt.topup_rounds} extra round(s)`;
+    } else {
+      sub.textContent = 'Unexplored areas';
+      sub.title = '';
+    }
+  })();
   animateMetric('papersCount', papers.length, 'papersFill', Math.min(papers.length*5,100));
   setDensityMetric(analysis.gap_density||'medium');
   document.getElementById('summaryText').textContent = analysis.summary||'';
