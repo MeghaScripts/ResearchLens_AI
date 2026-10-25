@@ -149,3 +149,48 @@ def compute_semantic_similarities(query_text, paper_texts, tfidf_fallback_values
     query_vec = vectors[0]
     values = [max(0.0, min(1.0, _cosine_np(query_vec, vectors[i + 1]))) for i in range(n)]
     return values, 'sentence_transformer'
+
+
+# ─── optional cross-encoder rerank ──────────────────────────────────
+CROSS_ENCODER_NAME = os.environ.get('DEEP_CROSS_ENCODER', '')     # e.g. cross-encoder/ms-marco-MiniLM-L-6-v2
+_cross = None
+_cross_attempted = False
+_cross_error = None
+
+
+def _try_load_cross_encoder():
+    """Loaded at most once per process, like the bi-encoder; a failure is cached and means "not available"."""
+    global _cross, _cross_attempted, _cross_error
+    if _cross_attempted:
+        return _cross
+    _cross_attempted = True
+    if not CROSS_ENCODER_NAME or DISABLED:
+        return None
+    try:
+        from sentence_transformers import CrossEncoder
+        _cross = CrossEncoder(CROSS_ENCODER_NAME)
+    except Exception as e:
+        _cross_error = f'{type(e).__name__}: {e}'
+        _cross = None
+    return _cross
+
+
+def cross_encoder_scores(query, texts):
+    """Relevance of each text to the query in 0-1 (sigmoid of the cross-encoder logit), or None when no
+    cross-encoder is configured / loadable. Never raises: relevance scoring must work without it."""
+    model = _try_load_cross_encoder()
+    if model is None:
+        return None
+    try:
+        import math
+        logits = model.predict([(query, t or '') for t in texts], show_progress_bar=False)
+        return [1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, float(x))))) for x in logits]
+    except Exception as e:
+        global _cross_error
+        _cross_error = f'predict failed: {type(e).__name__}: {e}'
+        return None
+
+
+def cross_encoder_status():
+    return {'configured': bool(CROSS_ENCODER_NAME), 'available': _cross is not None,
+            'model': CROSS_ENCODER_NAME or None, 'reason': _cross_error}

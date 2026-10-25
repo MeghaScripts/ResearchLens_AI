@@ -78,6 +78,7 @@ HONESTY NOTES — read these before claiming anything about this module:
     full_text_analysis.py), which contributes to the QUALITY score only,
     never to authenticity.
 """
+import json
 import os
 import re
 import math
@@ -269,6 +270,9 @@ RELEVANCE_WEIGHTS = {
     'keyword_overlap': 0.20,
     'topic_overlap': 0.15,
     'semantic_similarity': 0.10,
+    # Optional cross-encoder rerank (DEEP_CROSS_ENCODER=<model name>): 0 = off. When a model is configured
+    # and loads, this weight defaults to 0.20 (set DEEP_RELEVANCE_WEIGHTS to change it).
+    'cross_encoder': 0.0,
 }
 
 # Level-3 quality weights (the architecture note's 55% block,
@@ -285,6 +289,26 @@ QUALITY_WEIGHTS = {
 }
 
 OVERALL_WEIGHTS = {'authenticity': 0.20, 'relevance': 0.25, 'quality': 0.55}
+
+
+def _apply_weight_overrides():
+    """DEEP_RELEVANCE_WEIGHTS / DEEP_QUALITY_WEIGHTS: JSON objects, e.g. the ones printed by
+    `python -m eval.run_levels`. Unknown keys and negative values are ignored; a bad JSON string is
+    reported and ignored (the shipped weights stay)."""
+    for env, table in (('DEEP_RELEVANCE_WEIGHTS', RELEVANCE_WEIGHTS), ('DEEP_QUALITY_WEIGHTS', QUALITY_WEIGHTS)):
+        raw = os.environ.get(env)
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+            for k, v in data.items():
+                if k in table and isinstance(v, (int, float)) and v >= 0:
+                    table[k] = float(v)
+        except (ValueError, AttributeError) as e:
+            print(f'paper_verification: ignoring {env}: {e}')
+
+
+_apply_weight_overrides()
 
 
 # ─── Publication types ──────────────────────────────────────────────
@@ -833,6 +857,8 @@ SS_BATCH_FIELDS = ("title,year,venue,authors,authors.externalIds,externalIds,"
                    "publicationTypes,publicationVenue,citationCount,"
                    "influentialCitationCount,isOpenAccess")
 SS_BATCH_DELAY = 1.0
+SS_RETRIES = int(os.environ.get('S2_RETRIES', '3'))          # extra tries after an HTTP 429
+SS_MAX_WAIT = float(os.environ.get('S2_MAX_WAIT_S', '20'))   # cap on one backoff sleep
 
 
 def semantic_scholar_lookup_batch(papers):
@@ -872,8 +898,19 @@ def semantic_scholar_lookup_batch(papers):
     for i in range(0, len(ids), SS_BATCH_SIZE):
         chunk = ids[i:i + SS_BATCH_SIZE]
         try:
-            resp = requests.post(SS_BATCH_URL, params={'fields': SS_BATCH_FIELDS},
-                                 json={'ids': chunk}, timeout=30, headers=UA)
+            headers = dict(UA)
+            if os.environ.get('S2_API_KEY'):
+                headers['x-api-key'] = os.environ['S2_API_KEY']      # keyed tier: far fewer 429s
+            for attempt in range(SS_RETRIES + 1):
+                resp = requests.post(SS_BATCH_URL, params={'fields': SS_BATCH_FIELDS},
+                                     json={'ids': chunk}, timeout=30, headers=headers)
+                if resp.status_code != 429 or attempt == SS_RETRIES:
+                    break
+                try:
+                    wait = float(resp.headers.get('Retry-After') or 0)
+                except (TypeError, ValueError):
+                    wait = 0.0
+                time.sleep(min(SS_MAX_WAIT, max(wait, 2.0 * (attempt + 1))))
             resp.raise_for_status()
             results = resp.json()
         except Exception as e:
@@ -1624,7 +1661,11 @@ def compute_relevance_scores(papers, topic, keywords=None, research_question=Non
     semantic_values, semantic_method = semantic_similarity.compute_semantic_similarities(
         query, semantic_texts, tfidf_cosines)
 
-    for paper, vec, tfidf_value, semantic_value in zip(papers, vectors[1:], tfidf_cosines, semantic_values):
+    cross_values = semantic_similarity.cross_encoder_scores(query, semantic_texts)   # None when not configured
+    if cross_values is not None and RELEVANCE_WEIGHTS.get('cross_encoder', 0.0) <= 0:
+        RELEVANCE_WEIGHTS['cross_encoder'] = 0.20
+    for idx, (paper, vec, tfidf_value, semantic_value) in enumerate(
+            zip(papers, vectors[1:], tfidf_cosines, semantic_values)):
         raw = {}
 
         title_overlap = _token_overlap(query_tokens, tokenize(paper.get('title') or ''))
@@ -1654,6 +1695,9 @@ def compute_relevance_scores(papers, topic, keywords=None, research_question=Non
 
         raw['semantic_similarity'] = semantic_value
         paper['relevance_similarity_method'] = semantic_method
+        if cross_values is not None:
+            # sigmoid in 0-1, halved because the blend below treats a raw 0.5 as "clearly on topic"
+            raw['cross_encoder'] = cross_values[idx] * 0.5
 
         available = sum(RELEVANCE_WEIGHTS[c] for c in raw)
         score, components = 0.0, {}
@@ -2260,6 +2304,7 @@ def verify_papers(papers, topic, keywords=None, research_question=None,
         'network_verified_count': len(network_slice),
         'venue_verification': venue_summary,
         'semantic_similarity': semantic_similarity.model_status(),
+        'cross_encoder': semantic_similarity.cross_encoder_status(),
         'author_verification': author_summary,
         'thresholds': {
             'authenticity_min': AUTHENTICITY_REJECT_THRESHOLD,

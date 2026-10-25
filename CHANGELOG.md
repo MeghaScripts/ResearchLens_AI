@@ -13,6 +13,11 @@ All notable changes. Format: [Keep a Changelog](https://keepachangelog.com), ver
 ### Fixed
 - `verify_papers` no longer aborts when a registry client raises unexpectedly (`_guarded`), and accepts a non-string DOI.
 - Daily scheduler now starts on hosts with a non-zoneinfo timezone name (`BackgroundScheduler(timezone='UTC')`).
+### Added (per-level evaluation)
+- `eval/run_levels.py`: authenticity, relevance and quality measured separately; `eval/relevance_eval.py` (pair-based relevance eval, weight and cutoff fitting), `eval/quality_eval.py` (rating sheet, kappa, Spearman, ridge fit), `eval/fit.py` (pure-Python AUC, Spearman, kappa, logistic and ridge).
+- `eval.run_eval --cv K` pooled k-fold evaluation; `--drop-cache`.
+- `DEEP_RELEVANCE_WEIGHTS` / `DEEP_QUALITY_WEIGHTS` overrides; optional cross-encoder rerank (`DEEP_CROSS_ENCODER`).
+- Semantic Scholar: API key header and 429 back-off; the eval cache no longer stores rate-limited batches and returns copies of cached entries.
 ### Changed (this round)
 - arXiv multi-source fetch retries (https x2, then http) with `ARXIV_TIMEOUT` (default 20 s) instead of one 8 s attempt; the "could not reach any source" message now separates failures from sources skipped for a missing API key.
 - Opt-in `DEEP_STRICT_FIELD_REJECT=1` (and `python -m eval.run_eval --strict`): reject on one severe title/author mismatch against the registry record the identifier resolves to. Off by default.

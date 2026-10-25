@@ -7,6 +7,7 @@ re-querying Crossref / OpenAlex / Semantic Scholar every time.
 Keys use only the identifying fields of a paper (title, doi, year, authors, ids), never the scores that
 verify_papers adds while it runs, so a re-run hits the same entries.
 """
+import copy
 import json
 import os
 
@@ -57,12 +58,14 @@ def _decode(d):
     return set(d['__set__']) if '__set__' in d else d
 
 
-def install(path, cache_only=False):
+def install(path, cache_only=False, drop_prefixes=()):
     """Wrap every registry call with the cache. Returns a handle with .save(), .restore(), .stats."""
     store = {}
     if os.path.exists(path):
         with open(path, encoding='utf-8') as f:
             store = json.load(f, object_hook=_decode)
+    for key in [k for k in store if any(k.startswith(p + '|') for p in drop_prefixes)]:
+        del store[key]
     stats = {'hits': 0, 'misses': 0, 'stored': 0}
     originals = []
 
@@ -76,7 +79,9 @@ def install(path, cache_only=False):
             key = name + '|' + json.dumps(_norm([list(args), kwargs]), sort_keys=True, default=str)
             if key in store:
                 stats['hits'] += 1
-                return store[key]
+                # a copy: verify_papers pops '__answered__' off the Semantic Scholar batch result, which would
+                # otherwise corrupt the stored entry and make replays differ from the first run
+                return copy.deepcopy(store[key])
             stats['misses'] += 1
             if cache_only:
                 return {} if kind == 'batch' else {'found': False, 'error': 'cache miss (replay mode)'}
@@ -85,7 +90,9 @@ def install(path, cache_only=False):
                 json.dumps(result, default=_encode)
             except TypeError:
                 return result                       # uncacheable result: pass through, don't store
-            store[key] = result
+            if name == 'semantic_scholar_lookup_batch' and isinstance(result, dict) and not result.get('__answered__'):
+                return result                       # rate-limited / failed batch: never cache a non-answer
+            store[key] = copy.deepcopy(result)
             stats['stored'] += 1
             return result
 

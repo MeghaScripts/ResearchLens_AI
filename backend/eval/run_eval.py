@@ -19,6 +19,7 @@ import argparse
 import copy
 import json
 import os
+import random
 import sys
 
 import paper_verification as pv
@@ -82,12 +83,11 @@ def _score(preds):
     return metrics.summarise((r['label'], r['prediction']) for r in preds)
 
 
-def tune(train, target=0.95, auth_grid=AUTH_GRID, rel_grid=REL_GRID):
-    """Grid-search the two thresholds on TRAIN. Objective: highest coverage among settings whose decisive
-    accuracy reaches `target`; if none reaches it, the highest decisive accuracy (coverage breaks ties).
-    The papers are verified once; each grid point only re-applies the verdict rules (instant).
+def tune_pairs(pairs, target=0.95, auth_grid=AUTH_GRID, rel_grid=REL_GRID):
+    """Grid-search the two thresholds on already-verified TRAIN pairs. Objective: highest coverage among
+    settings whose decisive accuracy reaches `target`; if none reaches it, the highest decisive accuracy
+    (coverage breaks ties). Each grid point only re-applies the verdict rules (instant).
     -> (best, table) with best = {'auth_min','rel_min','coverage','decisive_accuracy','met_target'}."""
-    pairs = verify_once(train)
     table = []
     for a in auth_grid:
         for r in rel_grid:
@@ -105,12 +105,83 @@ def tune(train, target=0.95, auth_grid=AUTH_GRID, rel_grid=REL_GRID):
     return best, table
 
 
+def tune(train, target=0.95, auth_grid=AUTH_GRID, rel_grid=REL_GRID):
+    """Verify `train` records once, then tune_pairs()."""
+    return tune_pairs(verify_once(train), target, auth_grid, rel_grid)
+
+
+def stratified_folds(items, key, k, seed=13):
+    """k folds with every category spread across them. -> list of k lists."""
+    rng = random.Random(seed)
+    groups = {}
+    for it in items:
+        groups.setdefault(key(it), []).append(it)
+    folds = [[] for _ in range(k)]
+    n = 0
+    for g in sorted(groups):
+        members = groups[g][:]
+        rng.shuffle(members)
+        for m in members:
+            folds[n % k].append(m)
+            n += 1
+    return folds
+
+
+def cv_evaluate(pairs, k=5, target=0.95, auth_grid=AUTH_GRID, rel_grid=REL_GRID, seed=13, tune_thresholds=True):
+    """k-fold cross-validation over verified (record, paper) pairs. For each fold the thresholds are tuned on
+    the other k-1 folds only, then applied to the held-out fold; every record therefore gets exactly one
+    out-of-fold prediction and the pooled metrics use ALL records (a tighter interval than one 30% split).
+    -> (pooled_predictions, chosen) where chosen lists the thresholds picked per fold."""
+    folds = stratified_folds(pairs, key=lambda p: p[0]['category'], k=k, seed=seed)
+    preds, chosen = [], []
+    for i, held in enumerate(folds):
+        if not held:
+            continue
+        if tune_thresholds:
+            train = [p for j, f in enumerate(folds) if j != i for p in f]
+            best, _ = tune_pairs(train, target, auth_grid, rel_grid)
+            chosen.append({k_: best[k_] for k_ in ('auth_min', 'rel_min', 'met_target')})
+            preds.extend(decide(held, best['auth_min'], best['rel_min']))
+        else:
+            preds.extend(decide(held))
+    return preds, chosen
+
+
+def run_cv(args, handle):
+    records = load_jsonl(args.data)
+    pairs = verify_once(records)
+    print(f'[eval] {len(records)} records verified once; {args.cv}-fold cross-validation, '
+          f'thresholds tuned inside each training split only')
+    preds, chosen = cv_evaluate(pairs, k=args.cv, target=args.target, seed=args.seed)
+    s = _score(preds)
+    print(metrics.format_report(f'POOLED OUT-OF-FOLD ({args.cv}-fold, n={len(preds)})', s))
+    by_cat = metrics.by_category(preds)
+    print('\nPer category (pooled): decided / n  and decisive accuracy')
+    for cat, c in by_cat.items():
+        print(f"  {cat:16} {c['decided']:>3}/{c['n']:<3}  {c['decisive_accuracy']:.0%}")
+    print('thresholds chosen per fold:', chosen)
+    report = {'mode': f'{args.cv}-fold CV', 'strict': bool(args.strict), 'n': len(preds), 'pooled': s,
+              'pooled_by_category': by_cat, 'thresholds_per_fold': chosen}
+    base = _score(decide(pairs))
+    report['all_records_defaults'] = base
+    print('\n' + metrics.format_report('ALL RECORDS at the shipped default thresholds (no tuning)', base))
+    return report
+
+
 def run(args):
-    handle = registry_cache.install(args.cache, cache_only=args.cache_only)
+    handle = registry_cache.install(args.cache, cache_only=args.cache_only, drop_prefixes=args.drop_cache or ())
     if args.strict:
         pv.STRICT_FIELD_REJECT = True
         print('[eval] STRICT mode: one severe title/author mismatch against the resolved registry record rejects')
     try:
+        if args.cv:
+            report = run_cv(args, handle)
+            print(f"\n[cache] hits={handle.stats['hits']} misses={handle.stats['misses']} stored={handle.stats['stored']}")
+            os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+            with open(args.out, 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2, default=str)
+            print(f'[eval] wrote {args.out}')
+            return report
         records = load_jsonl(args.data)
         train, test = split_train_test(records, test_fraction=0.30, seed=args.seed)
         print(f'[eval] {len(records)} records -> train {len(train)} / test {len(test)}')
@@ -160,6 +231,8 @@ def main(argv=None):
     ap.add_argument('--tune', action='store_true', help='search thresholds on the train split')
     ap.add_argument('--target', type=float, default=0.95, help='decisive-accuracy target for --tune')
     ap.add_argument('--strict', action='store_true', help='reject on one severe title/author mismatch (opt-in rule)')
+    ap.add_argument('--cv', type=int, default=0, metavar='K', help='k-fold cross-validation over ALL records (pooled out-of-fold metrics)')
+    ap.add_argument('--drop-cache', nargs='*', metavar='PREFIX', help='forget cached answers of these registry calls first, e.g. semantic_scholar_lookup_batch')
     ap.add_argument('--cache-only', action='store_true', help='never call the network; misses act as unreachable')
     ap.add_argument('--seed', type=int, default=13)
     run(ap.parse_args(argv))
